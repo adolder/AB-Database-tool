@@ -2,3 +2,5 @@
 Database Onderhoud/params/connection.json
 # Runtime state of the last wizard connection; flow-parameters.json.example is the committed template.
 Database Onderhoud/params/flow-parameters.json
+# Local IAM application URL/id override (changes after IAM upgrades); iam-config.json.example is the committed template.
+Database Onderhoud/params/iam-config.json
