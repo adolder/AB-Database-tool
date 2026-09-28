@@ -1,0 +1,6 @@
+{
+  "id": "controle-gebruikers-db",
+  "label": "Gebruikers Controle DB",
+  "description": "Controleert de gebruikers in de database van de actieve omgeving op afwijkingen.",
+  "implemented": false
+}

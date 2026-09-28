@@ -1,0 +1,6 @@
+{
+  "id": "deactiveren-gebruikers",
+  "label": "Gebruikers Deactiveren",
+  "description": "Deactiveert geselecteerde gebruikers in de actieve omgeving.",
+  "implemented": false
+}

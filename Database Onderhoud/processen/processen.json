@@ -1,0 +1,7 @@
+{
+  "processes": [
+    { "id": "controle-gebruikers-db", "file": "controle-gebruikers-db.process.json" },
+    { "id": "toevoegen-gebruikers", "file": "toevoegen-gebruikers.process.json" },
+    { "id": "deactiveren-gebruikers", "file": "deactiveren-gebruikers.process.json" }
+  ]
+}

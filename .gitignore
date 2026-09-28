@@ -1,0 +1,4 @@
+# Local connection config with real environment credentials; keep connection.json.example as the committed template.
+Database Onderhoud/params/connection.json
+# Runtime state of the last wizard connection; flow-parameters.json.example is the committed template.
+Database Onderhoud/params/flow-parameters.json

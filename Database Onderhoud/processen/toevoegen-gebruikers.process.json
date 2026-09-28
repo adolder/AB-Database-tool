@@ -1,0 +1,9 @@
+{
+  "id": "toevoegen-gebruikers",
+  "label": "Gebruikers Toevoegen",
+  "description": "Voegt gebruikers toe, met keuze uit een bron.",
+  "sources": [
+    { "id": "applicatie", "label": "Vanuit de applicatie", "implemented": false },
+    { "id": "iam", "label": "Vanuit IAM", "implemented": true }
+  ]
+}
