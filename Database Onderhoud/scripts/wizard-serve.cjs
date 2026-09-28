@@ -37,6 +37,11 @@ function escapeHtml(value) {
 const EMBEDDED_IMAGES = require('./embedded-images.cjs');
 const designerImageDataUri = EMBEDDED_IMAGES.DESIGNER_IMAGE;
 const actoLogoDataUri = EMBEDDED_IMAGES.ACTO_LOGO;
+const gbIconDashboardDataUri = EMBEDDED_IMAGES.GB_ICON_DASHBOARD;
+const gbIconUserDataUri = EMBEDDED_IMAGES.GB_ICON_USER;
+const gbIconAddGroupDataUri = EMBEDDED_IMAGES.GB_ICON_ADD_GROUP;
+const gbIconDeleteDataUri = EMBEDDED_IMAGES.GB_ICON_DELETE;
+const gbIconGarbageDataUri = EMBEDDED_IMAGES.GB_ICON_GARBAGE;
 
 // Card hit-zones as percentages of the image (1536x1024), measured by pixel-scanning
 // the white card regions in Designer.png (not estimated), read left to right.
@@ -400,6 +405,26 @@ const SHARED_STYLE = `
   }
   .placeholder-body h1 { color: #14305c; }
   .back-link { margin-top: 16px; color: #14305c; }
+  .menu-exit-fab {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.12);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+  }
+  .menu-exit-fab:hover, .menu-exit-fab:focus-visible {
+    background: rgba(255, 255, 255, 0.22);
+    outline: none;
+  }
+  .menu-exit-fab svg { width: 28px; height: 28px; }
 `;
 
 const SHARED_SCRIPT = `
@@ -438,6 +463,7 @@ function renderMenuPage() {
     ${imageHtml}
     ${hotspotsHtml}
   </div>
+  <button class="menu-exit-fab" type="button" title="Afsluiten" id="menuExitBtn">${GB_ICON_POWER_SVG}</button>
 </div>
 <script>${SHARED_SCRIPT}</script>
 <script>
@@ -447,6 +473,7 @@ function renderMenuPage() {
       window.location.href = feature === 'gebruikers' ? '/gebruikersbeheer' : ('/placeholder?feature=' + encodeURIComponent(feature));
     });
   });
+  document.getElementById('menuExitBtn').addEventListener('click', cancelWizard);
 </script>
 </body>
 </html>`;
@@ -454,15 +481,22 @@ function renderMenuPage() {
 
 // --- Gebruikersbeheer shell (sidebar + nav shared across its sub-pages) ----
 
+// Standard power (circle + line) icon, colored so it stands out from the other nav icons.
+const GB_ICON_POWER_SVG = '<svg class="gb-nav-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">'
+  + '<path d="M12 3v8" stroke="#ff6b57" stroke-width="2.4" stroke-linecap="round"/>'
+  + '<path d="M6.5 6.5a8 8 0 1 0 11 0" stroke="#ff6b57" stroke-width="2.4" stroke-linecap="round"/>'
+  + '</svg>';
+
 const GB_NAV_ITEMS = [
-  { key: 'dashboard', icon: '&#128202;', label: 'Dashboard' },
-  { key: 'controle-omgeving', icon: '&#128100;', label: 'Controleren gebruikers omgeving' },
-  { key: 'controle-iam', icon: '&#128100;', label: 'Controleren gebruikers IAM' },
-  { key: 'toevoegen-omgeving', icon: '&#10133;', label: 'Gebruikers toevoegen omgeving' },
-  { key: 'toevoegen-iam', icon: '&#10133;', label: 'Gebruikers toevoegen IAM' },
-  { key: 'deactiveren-omgeving', icon: '&#128683;', label: 'Gebruikers deactiveren omgeving' },
-  { key: 'deactiveren-iam', icon: '&#128683;', label: 'Gebruikers deactiveren IAM' },
-  { key: 'schonen-iam', icon: '&#129529;', label: 'Gebruiker schonen IAM' }
+  { key: 'dashboard', icon: gbIconDashboardDataUri, label: 'Dashboard' },
+  { key: 'controle-omgeving', icon: gbIconUserDataUri, label: 'Controleren gebruikers omgeving' },
+  { key: 'controle-iam', icon: gbIconUserDataUri, label: 'Controleren gebruikers IAM' },
+  { key: 'toevoegen-omgeving', icon: gbIconAddGroupDataUri, label: 'Gebruikers toevoegen omgeving' },
+  { key: 'toevoegen-iam', icon: gbIconAddGroupDataUri, label: 'Gebruikers toevoegen IAM' },
+  { key: 'deactiveren-omgeving', icon: gbIconDeleteDataUri, label: 'Gebruikers deactiveren omgeving' },
+  { key: 'deactiveren-iam', icon: gbIconDeleteDataUri, label: 'Gebruikers deactiveren IAM' },
+  { key: 'schonen-iam', icon: gbIconGarbageDataUri, label: 'Gebruiker schonen IAM' },
+  { key: 'afsluiten', icon: GB_ICON_POWER_SVG, label: 'Afsluiten' }
 ];
 
 const GB_ROUTES = {
@@ -475,7 +509,7 @@ const GB_SHELL_STYLE = `
   .gb-active-env-badge { position: absolute; top: 24px; right: 40px; font-size: 0.85rem; color: #14305c; background: #eaf2fc; border-radius: 999px; padding: 8px 18px; font-weight: 600; }
   .gb-logo-box { display: flex; align-items: center; gap: 12px; padding: 24px 22px; }
   .gb-logo-img { height: 56px; width: auto; display: block; flex: 0 0 auto; }
-  .gb-logo-tagline { font-size: 0.78rem; color: #2f5fa8; }
+  .gb-logo-tagline { font-size: 0.78rem; color: #2f5fa8; font-weight: 700; }
   .gb-rail { position: relative; flex: 1; background: linear-gradient(160deg, #152a52 0%, #1c3f7a 80%); border-top-right-radius: 70px; overflow: hidden; }
   .gb-rail .gb-rail-mark {
     position: absolute;
@@ -493,6 +527,7 @@ const GB_SHELL_STYLE = `
   .gb-rail .gb-rail-mark span { background: #fff; border-radius: 24px; }
   .gb-nav { position: relative; z-index: 1; list-style: none; margin: 12px 0 0; padding: 0; }
   .gb-nav-item { display: flex; align-items: center; gap: 12px; padding: 14px 24px; color: #cbd8ee; font-size: 0.95rem; cursor: pointer; border: none; background: none; width: 100%; text-align: left; }
+  .gb-nav-icon { width: 1.2em; height: 1.2em; object-fit: contain; flex: 0 0 auto; }
   .gb-nav-item:hover, .gb-nav-item:focus-visible { background: rgba(255, 255, 255, 0.08); color: #fff; }
   .gb-nav-item-active { background: rgba(255, 255, 255, 0.14); color: #fff; font-weight: 700; }
   .gb-right { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
@@ -518,7 +553,10 @@ const GB_SHELL_STYLE = `
 function renderGbNavHtml(activeKey) {
   return GB_NAV_ITEMS.map(function (item) {
     const activeClass = item.key === activeKey ? ' gb-nav-item-active' : '';
-    return '<li><button class="gb-nav-item' + activeClass + '" type="button" data-feature="' + item.key + '">' + item.icon + ' ' + escapeHtml(item.label) + '</button></li>';
+    const iconHtml = item.icon.indexOf('data:image') === 0
+      ? '<img class="gb-nav-icon" src="' + item.icon + '" alt="">'
+      : item.icon;
+    return '<li><button class="gb-nav-item' + activeClass + '" type="button" data-feature="' + item.key + '">' + iconHtml + ' ' + escapeHtml(item.label) + '</button></li>';
   }).join('');
 }
 
@@ -526,6 +564,10 @@ const GB_NAV_SCRIPT = `
   document.querySelectorAll('.gb-nav-item[data-feature]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       const feature = btn.getAttribute('data-feature');
+      if (feature === 'afsluiten') {
+        cancelWizard();
+        return;
+      }
       const routes = ${JSON.stringify(GB_ROUTES)};
       if (feature === 'dashboard') {
         window.location.href = '/menu';
@@ -552,7 +594,7 @@ function renderGbShell(activeKey, title, subtitle, bodyHtml, extraStyle, extraSc
   <div class="gb-left">
     <div class="gb-logo-box">
       <img class="gb-logo-img" src="${actoLogoDataUri}" alt="Acto">
-      <div class="gb-logo-tagline">database onderhoud</div>
+      <div class="gb-logo-tagline">Database Onderhoud</div>
     </div>
     <div class="gb-rail">
       <div class="gb-rail-mark"><span></span><span></span><span></span><span></span></div>
