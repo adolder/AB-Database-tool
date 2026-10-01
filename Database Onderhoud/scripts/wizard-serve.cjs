@@ -566,6 +566,32 @@ async function employeeEmailExists(appUrl, authHeader, email) {
   return employeeFieldValueExists(appUrl, authHeader, 'relationship_email_address', email);
 }
 
+// Same existence check but against IAM's 'usr' entity set (exact mail-field name not confirmed,
+// so it's resolved per row via pickUserFieldValue's fuzzy candidates instead of a server-side $filter).
+async function usrLoginIdExists(appUrl, authHeader, loginId) {
+  const base = String(appUrl || '').replace(/\/+$/, '');
+  const needle = String(loginId || '').trim().toLowerCase();
+  const filter = "tolower(usr_id) eq '" + needle.replace(/'/g, "''") + "'";
+  const filtered = await fetchJsonFromUrl(base + '/usr?$filter=' + encodeURIComponent(filter) + '&$top=1', authHeader, 15000);
+  if (filtered) return parseUserRowsResponse(filtered).length > 0;
+
+  const all = await fetchJsonFromUrl(base + '/usr?$top=5000', authHeader, 15000);
+  if (!all) return null;
+  return parseUserRowsResponse(all).some(function (row) {
+    return pickUserFieldValue(row, ['usr_id']).toLowerCase() === needle;
+  });
+}
+
+async function usrEmailExists(appUrl, authHeader, email) {
+  const base = String(appUrl || '').replace(/\/+$/, '');
+  const needle = String(email || '').trim().toLowerCase();
+  const all = await fetchJsonFromUrl(base + '/usr?$top=5000', authHeader, 15000);
+  if (!all) return null;
+  return parseUserRowsResponse(all).some(function (row) {
+    return pickUserFieldValue(row, ['mail_address', 'mailadres', 'email', 'email_address', 'e_mail', 'e_mail_address', 'mail']).toLowerCase() === needle;
+  });
+}
+
 // Departments usable for employees (the application's Afdeling lookup only lists employees_allowed ones); null on failure.
 async function fetchEmployeeDepartments(appUrl, authHeader) {
   const query = '$filter=' + encodeURIComponent('employees_allowed eq true')
@@ -1126,7 +1152,7 @@ const GB_NAV_ITEMS = [
     group: 'toevoegen', icon: gbIconAddGroupDataUri, label: 'Gebruikers toevoegen',
     children: [
       { key: 'toevoegen-omgeving', label: 'Omgeving', built: true },
-      { key: 'toevoegen-iam', label: 'IAM', built: false },
+      { key: 'toevoegen-iam', label: 'IAM', built: true },
       { key: 'toevoegen-vanuit-iam', label: 'Vanuit IAM naar omgeving', built: false }
     ]
   },
@@ -1146,6 +1172,7 @@ const GB_ROUTES = {
   'controle-omgeving': '/gebruikersbeheer/controle-omgeving',
   'controle-iam': '/gebruikersbeheer/controle-iam',
   'toevoegen-omgeving': '/gebruikersbeheer/toevoegen-omgeving',
+  'toevoegen-iam': '/gebruikersbeheer/toevoegen-iam',
   'configuratie-iam': '/gebruikersbeheer/configuratie-iam'
 };
 
@@ -1868,7 +1895,7 @@ const TOEVOEGEN_FORM_STYLE = `
   .gb-lookup-subtitle { margin: 12px 0 10px; font-size: 0.92rem; color: #1c3f7a; }
   .gb-lookup-flags { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; font-size: 0.88rem; color: #334155; }
   .gb-lookup-footer { display: flex; justify-content: flex-end; gap: 12px; padding: 12px 18px; border-top: 1px solid #eef1f6; }
-  #addUserForm .gb-actions { margin-top: 20px; }
+  #addUserForm .gb-actions, #addUserIamForm .gb-actions { margin-top: 20px; }
   .gb-btn-secondary { background: #fff; color: #1c3f7a; border: 1px solid #cbd5e1; box-shadow: none; }
 `;
 
@@ -2412,7 +2439,7 @@ const TOEVOEGEN_FORM_SCRIPT = `
       function checkEmail() {
         // Strip every whitespace-like character (regular/non-breaking/zero-width space, BOM), not
         // just at the edges: a space is never intentional in an email address (paste artifacts too).
-        const value = email.value.replace(/[\s\u200B\u200C\u200D\uFEFF]/g, '');
+        const value = email.value.replace(/[\\s\\u200B\\u200C\\u200D\\uFEFF]/g, '');
         email.value = value;
         if (!value) { emailState = ''; emailCheckedValue = ''; emailCheckPromise = null; showEmailCheck('', ''); return Promise.resolve(emailState); }
         if (value === emailCheckedValue && emailState === 'pending' && emailCheckPromise) return emailCheckPromise;
@@ -2468,7 +2495,7 @@ const TOEVOEGEN_FORM_SCRIPT = `
       email.addEventListener('blur', checkEmail);
       email.addEventListener('input', function () {
         // Strip every whitespace-like character continuously while typing/pasting (see checkEmail()).
-        const cleaned = email.value.replace(/[\s\u200B\u200C\u200D\uFEFF]/g, '');
+        const cleaned = email.value.replace(/[\\s\\u200B\\u200C\\u200D\\uFEFF]/g, '');
         if (cleaned !== email.value) email.value = cleaned;
         if (email.value !== emailCheckedValue) { emailState = ''; emailCheckPromise = null; showEmailCheck('', ''); }
       });
@@ -2638,6 +2665,1214 @@ function renderToevoegenOmgevingPage() {
     connectedPanelHtml: TOEVOEGEN_FORM_HTML,
     connectedPanelStyle: TOEVOEGEN_FORM_STYLE,
     connectedPanelScript: TOEVOEGEN_FORM_SCRIPT
+  });
+}
+
+// Branches step mirrors Controleren gebruikers IAM (iamOnly filter). Layout below mirrors the
+// IAM "Gebruiker" screen (Algemeen/Informatie/Periode left, Authenticatie/Login/Wachtwoord/
+// Gebruikersvoorkeuren right); fields are static for now, API wiring follows in a later step.
+function renderToevoegenIamFormHtml() {
+  const now = new Date();
+  const begintOpMaand = String(now.getMonth() + 1).padStart(2, '0');
+  const begintOpJaar = String(now.getFullYear());
+  return `
+  <form class="gb-panel" id="addUserIamForm" novalidate autocomplete="off">
+    <div class="gb-panel-title-bar">
+      <strong class="gb-panel-title">Gebruikers toevoegen</strong>
+      <button class="gb-icon-btn gb-icon-btn-plain" type="button" id="addUserIamResetBtn" title="Velden opschonen">${GB_ICON_RESET_SVG}</button>
+    </div>
+    <div class="gb-panel-body">
+      <div class="gb-form-scroll">
+      <div class="gb-form-cols">
+      <div class="gb-form-col">
+        <h3 class="gb-form-section">Algemeen</h3>
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="fIamTenant">Tenant:</label>
+          <div class="gb-form-lookup"><input class="gb-form-input gb-form-required gb-form-lookup-input" id="fIamTenant" name="tenant" type="text" readonly title="Kies een tenant via het vergrootglas"><input type="hidden" id="fIamTenantId" name="tenantId"><button class="gb-form-lookup-btn gb-form-lookup-btn-active" type="button" id="tenantLookupBtn" title="Tenant zoeken">&#128269;</button></div>
+          <label class="gb-form-label" for="fIamGebruikerId">Gebruiker id (inlognaam):</label>
+          <input class="gb-form-input gb-form-required" id="fIamGebruikerId" name="gebruikerId" type="text" maxlength="100" autocomplete="off">
+          <p class="gb-form-hint" id="iamLoginCheck" style="display:none;"></p>
+          <label class="gb-form-label" for="fIamVoornaam">Voornaam:</label>
+          <input class="gb-form-input gb-form-required" id="fIamVoornaam" name="voornaam" type="text" maxlength="100" autocomplete="off">
+          <label class="gb-form-label" for="fIamAchternaam">Achternaam:</label>
+          <input class="gb-form-input gb-form-required" id="fIamAchternaam" name="achternaam" type="text" maxlength="100" autocomplete="off">
+          <label class="gb-form-label" for="fIamGeslacht">Geslacht:</label>
+          <select class="gb-form-input" id="fIamGeslacht" name="geslacht">
+            <option value="man" selected>Man</option>
+            <option value="vrouw">Vrouw</option>
+          </select>
+          <label class="gb-form-label">Profiel foto:</label>
+          <div class="gb-form-upload gb-form-upload-disabled" id="fIamProfielFoto">
+            <span class="gb-form-upload-text">Niet beschikbaar</span>
+            <button class="gb-form-upload-btn" type="button" disabled title="Afbeelding uploaden via deze weg is niet beschikbaar">&#8593;</button>
+          </div>
+        </div>
+
+        <h3 class="gb-form-section">Informatie</h3>
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="fIamEmail">E-mailadres:</label>
+          <input class="gb-form-input gb-form-required" id="fIamEmail" name="email" type="email" maxlength="254" autocomplete="off">
+          <p class="gb-form-hint" id="iamEmailCheck" style="display:none;"></p>
+          <label class="gb-form-label" for="fIamTelefoon">Telefoonnummer:</label>
+          <input class="gb-form-input" id="fIamTelefoon" name="telefoon" type="tel" maxlength="30" autocomplete="off">
+          <label class="gb-form-label" for="fIamBedrijf">Bedrijf:</label>
+          <input class="gb-form-input gb-form-readonly" id="fIamBedrijf" name="bedrijf" type="text" readonly tabindex="-1">
+          <label class="gb-form-label" for="fIamMedewerkerId">Medewerker identificatie:</label>
+          <input class="gb-form-input" id="fIamMedewerkerId" name="medewerkerIdentificatie" type="text" maxlength="100" autocomplete="off">
+        </div>
+
+        <h3 class="gb-form-section">Periode</h3>
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="fIamBegintOpDag">Begint op:</label>
+          <div class="gb-form-split">
+            <div class="gb-date-input" id="fIamBegintOp">
+              <input class="gb-date-seg" id="fIamBegintOpDag" type="text" inputmode="numeric" maxlength="2" placeholder="dd" autocomplete="off" aria-label="Dag" value="01">
+              <span class="gb-date-sep">/</span>
+              <input class="gb-date-seg" id="fIamBegintOpMaand" type="text" inputmode="numeric" maxlength="2" placeholder="mm" autocomplete="off" aria-label="Maand" value="${begintOpMaand}">
+              <span class="gb-date-sep">/</span>
+              <input class="gb-date-seg gb-date-seg-year" id="fIamBegintOpJaar" type="text" inputmode="numeric" maxlength="4" placeholder="jjjj" autocomplete="off" aria-label="Jaar" value="${begintOpJaar}">
+            </div>
+            <input class="gb-form-input gb-form-short gb-form-readonly" id="fIamBegintOpTijd" name="begintOpTijd" type="text" value="00:00:00" readonly tabindex="-1">
+          </div>
+          <p class="gb-form-hint" id="iamBegintOpHint" style="display:none;"></p>
+          <label class="gb-form-label" for="fIamEindigtOpDag">Eindigt op:</label>
+          <div class="gb-form-split">
+            <div class="gb-date-input" id="fIamEindigtOp">
+              <input class="gb-date-seg" id="fIamEindigtOpDag" type="text" inputmode="numeric" maxlength="2" placeholder="dd" autocomplete="off" aria-label="Dag">
+              <span class="gb-date-sep">/</span>
+              <input class="gb-date-seg" id="fIamEindigtOpMaand" type="text" inputmode="numeric" maxlength="2" placeholder="mm" autocomplete="off" aria-label="Maand">
+              <span class="gb-date-sep">/</span>
+              <input class="gb-date-seg gb-date-seg-year" id="fIamEindigtOpJaar" type="text" inputmode="numeric" maxlength="4" placeholder="jjjj" autocomplete="off" aria-label="Jaar">
+            </div>
+            <input class="gb-form-input gb-form-short gb-form-readonly" id="fIamEindigtOpTijd" name="eindigtOpTijd" type="text" readonly tabindex="-1">
+          </div>
+          <p class="gb-form-hint" id="iamEindigtOpHint" style="display:none;"></p>
+        </div>
+      </div>
+
+      <div class="gb-form-col">
+        <h3 class="gb-form-section">Authenticatie</h3>
+        <div class="gb-form-radios gb-form-radios-vertical">
+          <label><input type="radio" name="authenticatie" value="rdbms" disabled> RDBMS</label>
+          <label><input type="radio" name="authenticatie" value="kerberos" disabled> Kerberos</label>
+          <label><input type="radio" name="authenticatie" value="windows" disabled> Windows</label>
+          <label><input type="radio" name="authenticatie" value="extern" disabled> Extern</label>
+          <label><input type="radio" name="authenticatie" value="iam" checked> IAM</label>
+        </div>
+
+        <h3 class="gb-form-section">Login</h3>
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="fIamInlogverificatie">Inlogverificatie:</label>
+          <select class="gb-form-input" id="fIamInlogverificatie" name="inlogverificatie">
+            <option value="wachtwoord" selected>Wachtwoord</option>
+            <option value="wachtwoord_email">Wachtwoord en email</option>
+            <option value="wachtwoord_sms">Wachtwoord en SMS</option>
+            <option value="wachtwoord_totp">Wachtwoord en TOTP token</option>
+          </select>
+          <label class="gb-form-label" for="fIamTotpGeregistreerd">TOTP apparaat geregistreerd:</label>
+          <div><input id="fIamTotpGeregistreerd" name="totpGeregistreerd" type="checkbox" disabled></div>
+          <label class="gb-form-label" for="fIamTerugvallenEmail">Terugvallen op email toegestaan:</label>
+          <div><input id="fIamTerugvallenEmail" name="terugvallenEmail" type="checkbox"></div>
+          <label class="gb-form-label" for="fIamMaxSessies">Sluit uit van max. # sessies:</label>
+          <div><input id="fIamMaxSessies" name="maxSessiesUitgesloten" type="checkbox"></div>
+          <label class="gb-form-label" for="fIamPersoonlijkeTokens">Persoonlijke toegangstokens:</label>
+          <div><input id="fIamPersoonlijkeTokens" name="persoonlijkeTokens" type="checkbox"></div>
+        </div>
+
+        <h3 class="gb-form-section">Wachtwoord</h3>
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="fIamWachtwoordWijzigen">Wijzigen toegestaan:</label>
+          <div><input id="fIamWachtwoordWijzigen" name="wachtwoordWijzigenToegestaan" type="checkbox"></div>
+          <label class="gb-form-label" for="fIamWachtwoordverloopbeleid">Wachtwoordverloopbeleid:</label>
+          <select class="gb-form-input" id="fIamWachtwoordverloopbeleid" name="wachtwoordverloopbeleid" disabled>
+            <option value="forced_expired">Geforceerd verlopen</option>
+            <option value="standard">Standaard beleid</option>
+            <option value="never" selected>Verloopt nooit</option>
+          </select>
+          <label class="gb-form-label"># gewijzigd/vergeten:</label>
+          <div class="gb-form-split">
+            <input class="gb-form-input gb-form-short gb-form-readonly" id="fIamAantalGewijzigd" name="aantalGewijzigd" type="number" value="0" readonly tabindex="-1">
+            <input class="gb-form-input gb-form-short gb-form-readonly" id="fIamAantalVergeten" name="aantalVergeten" type="number" value="0" readonly tabindex="-1">
+          </div>
+        </div>
+
+        <h3 class="gb-form-section">Gebruikersvoorkeuren</h3>
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="fIamConfiguratie">Configuratie:</label>
+          <select class="gb-form-input" id="fIamConfiguratie" name="configuratie"><option value="" selected>None</option></select>
+          <label class="gb-form-label" for="fIamApplicatieTaal">Applicatie taal:</label>
+          <select class="gb-form-input" id="fIamApplicatieTaal" name="applicatieTaal"><option value=""></option></select>
+          <label class="gb-form-label" for="fIamDatumnotatie">Datumnotatie:</label>
+          <input class="gb-form-input gb-form-readonly" id="fIamDatumnotatie" name="datumnotatie" type="text" readonly tabindex="-1">
+          <label class="gb-form-label" for="fIamGetalnotatie">Getalnotatie:</label>
+          <input class="gb-form-input gb-form-readonly" id="fIamGetalnotatie" name="getalnotatie" type="text" readonly tabindex="-1">
+          <label class="gb-form-label" for="fIamTijdzone">Tijdzone:</label>
+          <input class="gb-form-input gb-form-readonly" id="fIamTijdzone" name="tijdzone" type="text" value="Etc/UTC" readonly tabindex="-1">
+        </div>
+      </div>
+      </div>
+      </div>
+
+      <p id="addUserIamFeedback" class="gb-note" style="display:none;"></p>
+      <div class="gb-actions">
+        <button class="gb-btn" type="submit">Uitvoeren</button>
+      </div>
+    </div>
+  </form>
+
+  <div class="gb-lookup-overlay" id="iamPasswordDialog" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="iamPasswordDialogTitle">
+    <div class="gb-lookup-dialog gb-password-dialog">
+      <div class="gb-lookup-header"><strong id="iamPasswordDialogTitle">Wachtwoord wijzigen</strong></div>
+      <div class="gb-lookup-body gb-password-dialog-body">
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="iamPwTenant">Tenant:</label>
+          <input class="gb-form-input gb-form-readonly" id="iamPwTenant" type="text" readonly tabindex="-1">
+          <label class="gb-form-label" for="iamPwGebruiker">Gebruiker:</label>
+          <input class="gb-form-input gb-form-readonly" id="iamPwGebruiker" type="text" readonly tabindex="-1">
+          <label class="gb-form-label" for="iamPwNieuw">Nieuw wachtwoord:</label>
+          <input class="gb-form-input" id="iamPwNieuw" type="password" autocomplete="new-password">
+          <label class="gb-form-label" for="iamPwBevestig">Bevestig wachtwoord:</label>
+          <input class="gb-form-input" id="iamPwBevestig" type="password" autocomplete="new-password">
+        </div>
+        <p class="gb-password-strength" id="iamPwStrength">Sterkte: <span id="iamPwStrengthValue">0/5</span></p>
+        <p class="gb-note" id="iamPwFeedback" style="display:none;"></p>
+      </div>
+      <div class="gb-lookup-footer">
+        <button class="gb-btn" type="button" id="iamPwSubmitBtn" disabled>Uitvoeren</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="gb-lookup-overlay" id="iamUgDialog" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="iamUgDialogTitle">
+    <div class="gb-lookup-dialog gb-password-dialog">
+      <div class="gb-lookup-header"><strong id="iamUgDialogTitle">Gebruikersgroep toevoegen</strong></div>
+      <div class="gb-lookup-body gb-password-dialog-body">
+        <h3 class="gb-form-section">Gebruiker</h3>
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="iamUgTenant">Tenant:</label>
+          <input class="gb-form-input gb-form-required gb-form-readonly" id="iamUgTenant" type="text" readonly tabindex="-1">
+          <label class="gb-form-label" for="iamUgGebruikersgroep">Gebruikersgroep:</label>
+          <div class="gb-form-lookup"><input class="gb-form-input gb-form-required gb-form-lookup-input" id="iamUgGebruikersgroep" type="text" readonly title="Kies een gebruikersgroep via het vergrootglas"><input type="hidden" id="iamUgGebruikersgroepId"><button class="gb-form-lookup-btn gb-form-lookup-btn-active" type="button" id="iamUgGroupLookupBtn" title="Gebruikersgroep zoeken">&#128269;</button></div>
+          <label class="gb-form-label" for="iamUgGebruikerId">Gebruiker id:</label>
+          <input class="gb-form-input gb-form-required gb-form-readonly" id="iamUgGebruikerId" type="text" readonly tabindex="-1">
+        </div>
+
+        <h3 class="gb-form-section">Periode</h3>
+        <div class="gb-form-grid">
+          <label class="gb-form-label" for="iamUgBegintOpDag">Begint op:</label>
+          <div class="gb-form-split">
+            <div class="gb-date-input" id="iamUgBegintOp">
+              <input class="gb-date-seg" id="iamUgBegintOpDag" type="text" inputmode="numeric" maxlength="2" placeholder="dd" autocomplete="off" aria-label="Dag">
+              <span class="gb-date-sep">/</span>
+              <input class="gb-date-seg" id="iamUgBegintOpMaand" type="text" inputmode="numeric" maxlength="2" placeholder="mm" autocomplete="off" aria-label="Maand">
+              <span class="gb-date-sep">/</span>
+              <input class="gb-date-seg gb-date-seg-year" id="iamUgBegintOpJaar" type="text" inputmode="numeric" maxlength="4" placeholder="jjjj" autocomplete="off" aria-label="Jaar">
+            </div>
+            <input class="gb-form-input gb-form-short gb-form-readonly" id="iamUgBegintOpTijd" type="text" readonly tabindex="-1">
+          </div>
+          <p class="gb-form-hint" id="iamUgBegintOpHint" style="display:none;"></p>
+          <label class="gb-form-label" for="iamUgEindigtOpDag">Eindigt op:</label>
+          <div class="gb-form-split">
+            <div class="gb-date-input" id="iamUgEindigtOp">
+              <input class="gb-date-seg" id="iamUgEindigtOpDag" type="text" inputmode="numeric" maxlength="2" placeholder="dd" autocomplete="off" aria-label="Dag">
+              <span class="gb-date-sep">/</span>
+              <input class="gb-date-seg" id="iamUgEindigtOpMaand" type="text" inputmode="numeric" maxlength="2" placeholder="mm" autocomplete="off" aria-label="Maand">
+              <span class="gb-date-sep">/</span>
+              <input class="gb-date-seg gb-date-seg-year" id="iamUgEindigtOpJaar" type="text" inputmode="numeric" maxlength="4" placeholder="jjjj" autocomplete="off" aria-label="Jaar">
+            </div>
+            <input class="gb-form-input gb-form-short gb-form-readonly" id="iamUgEindigtOpTijd" type="text" readonly tabindex="-1">
+          </div>
+          <p class="gb-form-hint" id="iamUgEindigtOpHint" style="display:none;"></p>
+          <label class="gb-form-label" for="iamUgOpenId">OpenID aangemaakt:</label>
+          <div><input id="iamUgOpenId" type="checkbox"></div>
+        </div>
+        <p class="gb-note" id="iamUgFeedback" style="display:none;"></p>
+      </div>
+      <div class="gb-lookup-footer">
+        <button class="gb-btn" type="button" id="iamUgSubmitBtn" disabled>Uitvoeren</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="gb-lookup-overlay" id="iamUgGroupLookup" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="iamUgGroupLookupTitle">
+    <div class="gb-lookup-dialog">
+      <div class="gb-lookup-header"><strong id="iamUgGroupLookupTitle">Gebruikersgroepen</strong></div>
+      <div class="gb-lookup-body">
+        <div class="gb-lookup-list">
+          <input class="gb-search-input gb-lookup-search" id="iamUgGroupSearch" type="search" autocomplete="off" placeholder="Zoeken">
+          <p class="gb-branch-empty" id="iamUgGroupFeedback">Gebruikersgroepen ophalen...</p>
+          <div class="gb-lookup-table-scroll" id="iamUgGroupTableScroll" style="display:none;">
+            <table class="gb-user-table gb-lookup-table">
+              <thead><tr><th>Gebruikersgroep</th><th>Omschrijving</th><th>Product</th><th>Klantspecifiek</th></tr></thead>
+              <tbody id="iamUgGroupTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="gb-lookup-footer">
+        <button class="gb-btn" type="button" id="iamUgGroupSelectBtn" disabled>Selecteren</button>
+        <button class="gb-btn gb-btn-secondary" type="button" id="iamUgGroupCloseBtn">Sluiten</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="gb-lookup-overlay" id="tenantLookup" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="tenantLookupTitle">
+    <div class="gb-lookup-dialog">
+      <div class="gb-lookup-header"><strong id="tenantLookupTitle">Tenants</strong></div>
+      <div class="gb-lookup-body">
+        <div class="gb-lookup-list">
+          <input class="gb-search-input gb-lookup-search" id="tenantSearch" type="search" autocomplete="off" placeholder="Zoeken">
+          <p class="gb-branch-empty" id="tenantFeedback">Tenants ophalen...</p>
+          <div class="gb-lookup-table-scroll" id="tenantTableScroll" style="display:none;">
+            <table class="gb-user-table gb-lookup-table">
+              <thead><tr><th>Tenant naam</th><th>Standaard tenant</th><th>Klant Identificatie</th><th>Technische Identificatie</th></tr></thead>
+              <tbody id="tenantTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="gb-lookup-footer">
+        <button class="gb-btn" type="button" id="tenantSelectBtn" disabled>Selecteren</button>
+        <button class="gb-btn gb-btn-secondary" type="button" id="tenantCloseBtn">Sluiten</button>
+      </div>
+    </div>
+  </div>
+`;
+}
+
+const TOEVOEGEN_IAM_FORM_STYLE = TOEVOEGEN_FORM_STYLE + `
+  .gb-form-radios-vertical { display: flex; flex-wrap: wrap; column-gap: 20px; row-gap: 10px; margin-bottom: 18px; }
+  .gb-form-radios-vertical label { flex: 0 0 auto; }
+  .gb-form-split { display: flex; gap: 8px; }
+  .gb-form-split .gb-form-input { flex: 1 1 0; min-width: 0; }
+  .gb-form-upload { display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 10px; background: #fff; max-width: 220px; }
+  .gb-form-upload-text { font-size: 0.82rem; color: #8a99b3; font-style: italic; }
+  .gb-form-upload-btn { border: none; background: none; color: #2f5fa8; cursor: pointer; font-size: 1rem; }
+  .gb-form-upload-disabled { background: #eef1f6; }
+  .gb-form-upload-disabled .gb-form-upload-text { color: #8a99b3; }
+  .gb-form-upload-btn:disabled { color: #8a99b3; cursor: not-allowed; }
+  #addUserIamForm .gb-form-col:nth-child(2) .gb-form-grid { grid-template-columns: 200px minmax(0, 220px); }
+  .gb-password-dialog { width: min(460px, 94vw); height: auto; }
+  .gb-password-dialog-body { flex-direction: column; padding: 18px 20px; gap: 14px; }
+  .gb-password-dialog-body .gb-form-grid { grid-template-columns: 140px minmax(0, 1fr); }
+  .gb-password-strength { margin: 0; font-size: 0.86rem; color: #334155; }
+  #iamPwStrengthValue { font-weight: 700; }
+  #iamPwStrengthValue.weak { color: #b91c1c; }
+  #iamPwStrengthValue.medium { color: #c2850c; }
+  #iamPwStrengthValue.strong { color: #1f8a4c; }
+`;
+
+const TOEVOEGEN_IAM_FORM_SCRIPT = `
+  (function () {
+    // Tenant lookup (overlay with search), same pattern as Afdeling/Gebruikersgroep in het
+    // omgeving-formulier; de tabel toont alleen Tenant naam/Standaard tenant/Klant+Technische identificatie.
+    const tenant = document.getElementById('fIamTenant');
+    const tenantId = document.getElementById('fIamTenantId');
+    const tenantLookup = document.getElementById('tenantLookup');
+    const tenantSearch = document.getElementById('tenantSearch');
+    const tenantFeedback = document.getElementById('tenantFeedback');
+    const tenantTableScroll = document.getElementById('tenantTableScroll');
+    const tenantTbody = document.getElementById('tenantTbody');
+    const tenantSelectBtn = document.getElementById('tenantSelectBtn');
+    let tenants = null;
+    let selectedTenant = null;
+
+    function renderTenants() {
+      const needle = (tenantSearch.value || '').trim().toLowerCase();
+      const rows = tenants.filter(function (t) {
+        return !needle || [t.name, t.customerId, t.technicalId].some(function (v) {
+          return String(v || '').toLowerCase().indexOf(needle) !== -1;
+        });
+      });
+      if (!rows.length) {
+        tenantFeedback.style.display = '';
+        tenantFeedback.className = 'gb-branch-empty';
+        tenantFeedback.textContent = tenants.length ? 'Geen tenants gevonden voor deze zoekterm.' : 'Geen tenants gevonden.';
+        tenantTableScroll.style.display = 'none';
+        return;
+      }
+      tenantFeedback.style.display = 'none';
+      tenantTbody.innerHTML = rows.map(function (t) {
+        const sel = selectedTenant && selectedTenant.id === t.id ? ' class="gb-lookup-selected"' : '';
+        return '<tr data-id="' + escapeHtmlClient(t.id) + '"' + sel + '><td>' + escapeHtmlClient(t.name) + '</td><td><input type="checkbox" disabled' + (t.isDefault ? ' checked' : '') + '></td><td>'
+          + escapeHtmlClient(t.customerId) + '</td><td>' + escapeHtmlClient(t.technicalId) + '</td></tr>';
+      }).join('');
+      tenantTableScroll.style.display = '';
+    }
+
+    function pickTenant(id) {
+      selectedTenant = tenants.find(function (t) { return String(t.id) === String(id); }) || null;
+      tenantSelectBtn.disabled = !selectedTenant;
+      renderTenants();
+    }
+
+    function closeTenantLookup() {
+      tenantLookup.style.display = 'none';
+    }
+
+    function applyTenant(t) {
+      tenant.value = t.name;
+      tenantId.value = t.id;
+      tenant.classList.remove('gb-form-invalid');
+    }
+
+    function confirmTenant() {
+      if (!selectedTenant) return;
+      applyTenant(selectedTenant);
+      closeTenantLookup();
+    }
+
+    let tenantsRequest = null;
+    function loadTenants() {
+      if (!tenantsRequest) {
+        tenantsRequest = fetch('/api/gebruikersbeheer/toevoegen-iam/tenants', { cache: 'no-store' })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (!data || data.status !== 'ok') throw new Error((data && data.message) || 'onbekende fout');
+            tenants = data.tenants || [];
+            return tenants;
+          })
+          .catch(function (err) { tenantsRequest = null; throw err; });
+      }
+      return tenantsRequest;
+    }
+
+    // Zodra verbonden wordt de default tenant async opgehaald en ingevuld; Uitvoeren moet hierop
+    // wachten, anders kan Tenant nog als 'leeg' gemeld worden terwijl de default net onderweg is.
+    let tenantDefaultReady = Promise.resolve();
+
+    document.addEventListener('gb-connected', function () {
+      tenantDefaultReady = loadTenants().then(function (list) {
+        if (tenantId.value) return;
+        const def = list.find(function (t) { return t.isDefault; }) || list[0];
+        if (def) applyTenant(def);
+      }).catch(function () {});
+
+      const applicatieTaal = document.getElementById('fIamApplicatieTaal');
+      fetch('/api/gebruikersbeheer/toevoegen-iam/appl-languages', { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || data.status !== 'ok') throw new Error((data && data.message) || 'onbekende fout');
+          const languages = data.languages || [];
+          // Standaard: Nederlands (Nederland), anders de door de bron gemarkeerde standaardtaal, anders de eerste.
+          const nl = languages.find(function (l) { return /nederlands/i.test(l.name) && /nederland/i.test(l.name); })
+            || languages.find(function (l) { return l.isDefault; })
+            || languages[0];
+          applicatieTaal.innerHTML = languages.map(function (l) {
+            return '<option value="' + escapeHtmlClient(l.id) + '"' + (nl && l.id === nl.id ? ' selected' : '') + '>' + escapeHtmlClient(l.name) + '</option>';
+          }).join('');
+        })
+        .catch(function () {
+          // Laat het veld leeg bij een fout; er is geen apart feedback-element voor dit dropdown.
+        });
+
+      const configuratie = document.getElementById('fIamConfiguratie');
+      fetch('/api/gebruikersbeheer/toevoegen-iam/configuraties', { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || data.status !== 'ok') throw new Error((data && data.message) || 'onbekende fout');
+          const options = data.configuraties || [];
+          const complete = options.find(function (o) { return /complete/i.test(o.name); }) || options[0];
+          configuratie.innerHTML = options.map(function (o) {
+            return '<option value="' + escapeHtmlClient(o.id) + '"' + (complete && o.id === complete.id ? ' selected' : '') + '>' + escapeHtmlClient(o.name) + '</option>';
+          }).join('');
+        })
+        .catch(function () {
+          // Laat het veld leeg bij een fout; er is geen apart feedback-element voor dit dropdown.
+        });
+    });
+
+    function openTenantLookup() {
+      tenantLookup.style.display = '';
+      tenantSearch.value = '';
+      tenantSearch.focus();
+      if (tenants) {
+        selectedTenant = tenants.find(function (t) { return String(t.id) === tenantId.value; }) || null;
+        tenantSelectBtn.disabled = !selectedTenant;
+        renderTenants();
+        return;
+      }
+      tenantSelectBtn.disabled = true;
+      tenantFeedback.style.display = '';
+      tenantFeedback.className = 'gb-branch-empty';
+      tenantFeedback.textContent = 'Tenants ophalen...';
+      loadTenants().then(function () {
+        selectedTenant = tenants.find(function (t) { return String(t.id) === tenantId.value; }) || null;
+        tenantSelectBtn.disabled = !selectedTenant;
+        renderTenants();
+      }).catch(function (err) {
+        tenantFeedback.className = 'gb-note error';
+        tenantFeedback.textContent = 'Ophalen mislukt: ' + (err && err.message || 'onbekende fout');
+      });
+    }
+
+    document.getElementById('tenantLookupBtn').addEventListener('click', openTenantLookup);
+    document.getElementById('tenantCloseBtn').addEventListener('click', closeTenantLookup);
+    tenantSelectBtn.addEventListener('click', confirmTenant);
+    tenantSearch.addEventListener('input', function () { if (tenants) renderTenants(); });
+    tenantTbody.addEventListener('click', function (event) {
+      const row = event.target.closest('tr[data-id]');
+      if (row) pickTenant(row.getAttribute('data-id'));
+    });
+    tenantTbody.addEventListener('dblclick', function (event) {
+      const row = event.target.closest('tr[data-id]');
+      if (row) { pickTenant(row.getAttribute('data-id')); confirmTenant(); }
+    });
+    tenantLookup.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') closeTenantLookup();
+    });
+
+    // TOTP apparaat geregistreerd / Terugvallen op email zijn alleen beschikbaar bij 'Wachtwoord en TOTP token';
+    // het TOTP-vinkje volgt die keuze automatisch en blijft altijd disabled (kan niet handmatig uitgezet worden).
+    const inlogverificatie = document.getElementById('fIamInlogverificatie');
+    const totpGeregistreerd = document.getElementById('fIamTotpGeregistreerd');
+    const terugvallenEmail = document.getElementById('fIamTerugvallenEmail');
+    const iamTelefoon = document.getElementById('fIamTelefoon');
+    function updateLoginAvailability() {
+      const isTotp = inlogverificatie.value === 'wachtwoord_totp';
+      totpGeregistreerd.checked = isTotp;
+      terugvallenEmail.disabled = !isTotp;
+      if (!isTotp) terugvallenEmail.checked = false;
+
+      // Bij Wachtwoord en SMS is Telefoonnummer verplicht (SMS-verificatie heeft een telefoonnummer nodig).
+      const smsRequired = inlogverificatie.value === 'wachtwoord_sms';
+      iamTelefoon.classList.toggle('gb-form-required', smsRequired);
+      if (!smsRequired) iamTelefoon.classList.remove('gb-form-invalid');
+    }
+    inlogverificatie.addEventListener('change', updateLoginAvailability);
+    updateLoginAvailability();
+
+    // Wachtwoordverloopbeleid is alleen aanpasbaar als Wijzigen toegestaan aan staat; anders vast op 'Verloopt nooit'.
+    const wachtwoordWijzigen = document.getElementById('fIamWachtwoordWijzigen');
+    const wachtwoordverloopbeleid = document.getElementById('fIamWachtwoordverloopbeleid');
+    function updateWachtwoordverloopbeleidAvailability() {
+      wachtwoordverloopbeleid.disabled = !wachtwoordWijzigen.checked;
+      if (!wachtwoordWijzigen.checked) wachtwoordverloopbeleid.value = 'never';
+    }
+    wachtwoordWijzigen.addEventListener('change', updateWachtwoordverloopbeleidAvailability);
+    updateWachtwoordverloopbeleidAvailability();
+
+    // Same dd/mm/jjjj segmented-input behaviour as Datum in dienst/Datum uit dienst (omgeving-formulier).
+    function bindSegment(seg, maxLen, next, prev) {
+      seg.addEventListener('input', function () {
+        seg.value = seg.value.replace(/[^0-9]/g, '').slice(0, maxLen);
+        if (seg.value.length >= maxLen && next) { next.focus(); next.select(); }
+      });
+      seg.addEventListener('keydown', function (event) {
+        if (event.key === 'ArrowRight' && seg.selectionStart === seg.value.length && next) { event.preventDefault(); padSegment(); next.focus(); next.select(); }
+        else if (event.key === 'ArrowLeft' && seg.selectionStart === 0 && prev) { event.preventDefault(); padSegment(); prev.focus(); prev.select(); }
+        else if (event.key === 'Backspace' && !seg.value && prev) { event.preventDefault(); prev.focus(); prev.select(); }
+        else if ((event.key === '/' || event.key === '-') && next) { event.preventDefault(); padSegment(); next.focus(); next.select(); }
+      });
+      seg.addEventListener('focus', function () { seg.select(); });
+      function padSegment() {
+        if (seg.value && seg.value.length < maxLen) seg.value = seg.value.padStart(maxLen, '0');
+      }
+      seg.addEventListener('blur', padSegment);
+    }
+
+    function bindDmyGroup(prefix) {
+      const day = document.getElementById(prefix + 'Dag');
+      const month = document.getElementById(prefix + 'Maand');
+      const year = document.getElementById(prefix + 'Jaar');
+      bindSegment(day, 2, month, null);
+      bindSegment(month, 2, year, day);
+      bindSegment(year, 4, null, month);
+    }
+
+    bindDmyGroup('fIamBegintOp');
+    bindDmyGroup('fIamEindigtOp');
+
+    const begintOpDag = document.getElementById('fIamBegintOpDag');
+    const begintOpMaandSeg = document.getElementById('fIamBegintOpMaand');
+    const begintOpJaarSeg = document.getElementById('fIamBegintOpJaar');
+    const begintOp = document.getElementById('fIamBegintOp');
+    const begintOpHint = document.getElementById('iamBegintOpHint');
+    const eindigtOp = document.getElementById('fIamEindigtOp');
+    const eindigtOpHint = document.getElementById('iamEindigtOpHint');
+
+    // dd/mm/jjjj -> yyyy-mm-dd ISO (of '' als de datum niet geldig/compleet is).
+    function dmySegmentsToIso(day, month, year) {
+      if (!day || !month || !year) return '';
+      const d = Number(day);
+      const m = Number(month);
+      const y = Number(year);
+      const date = new Date(y, m - 1, d);
+      if (date.getFullYear() !== y || date.getMonth() !== m - 1 || date.getDate() !== d) return '';
+      return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    }
+
+    // Begint op is altijd verplicht (mag nooit leeg zijn of een onvolledige/ongeldige datum bevatten).
+    function checkBegintOp() {
+      const hasAllSegments = !!(begintOpDag.value && begintOpMaandSeg.value && begintOpJaarSeg.value);
+      const iso = hasAllSegments ? dmySegmentsToIso(begintOpDag.value, begintOpMaandSeg.value, begintOpJaarSeg.value) : '';
+      const invalid = !iso;
+      begintOp.classList.toggle('gb-form-invalid', invalid);
+      begintOpHint.style.display = invalid ? '' : 'none';
+      begintOpHint.textContent = !invalid ? '' : (hasAllSegments ? 'Vul een geldige datum in (dd/mm/jjjj).' : 'Begint op is verplicht; vul een volledige datum in.');
+      return !invalid;
+    }
+
+    // Eindigt op moet minimaal 1 dag na Begint op liggen.
+    function minEindigtOpIso() {
+      const iso = dmySegmentsToIso(begintOpDag.value, begintOpMaandSeg.value, begintOpJaarSeg.value);
+      if (!iso) return '';
+      const d = new Date(iso + 'T00:00:00');
+      d.setDate(d.getDate() + 1);
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    }
+
+    // Eindigt op heeft geen default datum; zodra dag/maand/jaar alle 3 gevuld zijn, krijgt het
+    // (afgeschermde) tijdveld 00:00:00, anders blijft het leeg.
+    const eindigtOpTijd = document.getElementById('fIamEindigtOpTijd');
+    const eindigtOpDag = document.getElementById('fIamEindigtOpDag');
+    const eindigtOpMaand = document.getElementById('fIamEindigtOpMaand');
+    const eindigtOpJaar = document.getElementById('fIamEindigtOpJaar');
+    function checkEindigtOp() {
+      const hasAllSegments = !!(eindigtOpDag.value && eindigtOpMaand.value && eindigtOpJaar.value);
+      eindigtOpTijd.value = hasAllSegments ? '00:00:00' : '';
+      const eindigtOpIso = hasAllSegments ? dmySegmentsToIso(eindigtOpDag.value, eindigtOpMaand.value, eindigtOpJaar.value) : '';
+      const min = minEindigtOpIso();
+      const invalidFormat = hasAllSegments && !eindigtOpIso;
+      const invalidRange = !!eindigtOpIso && !!min && eindigtOpIso < min;
+      const invalid = invalidFormat || invalidRange;
+      eindigtOp.classList.toggle('gb-form-invalid', invalid);
+      eindigtOpHint.style.display = invalid ? '' : 'none';
+      eindigtOpHint.textContent = invalidFormat ? 'Vul een geldige datum in (dd/mm/jjjj).'
+        : (invalidRange ? 'Datum eindigt op moet minimaal 1 dag na datum begint op liggen.' : '');
+      return !invalid;
+    }
+    [eindigtOpDag, eindigtOpMaand, eindigtOpJaar].forEach(function (seg) {
+      seg.addEventListener('input', checkEindigtOp);
+      seg.addEventListener('blur', checkEindigtOp);
+    });
+    [begintOpDag, begintOpMaandSeg, begintOpJaarSeg].forEach(function (seg) {
+      seg.addEventListener('input', function () { checkBegintOp(); checkEindigtOp(); });
+      seg.addEventListener('blur', function () { checkBegintOp(); checkEindigtOp(); });
+    });
+    checkBegintOp();
+    checkEindigtOp();
+
+    // Zelfde hoofdletter-per-woord opmaak als bij Gebruikers toevoegen omgeving.
+    const iamVoornaam = document.getElementById('fIamVoornaam');
+    iamVoornaam.addEventListener('input', function () {
+      const start = iamVoornaam.selectionStart;
+      const end = iamVoornaam.selectionEnd;
+      iamVoornaam.value = iamVoornaam.value.toLowerCase().replace(/(^|[\\s-])(\\S)/g, function (m, sep, ch) { return sep + ch.toUpperCase(); });
+      iamVoornaam.setSelectionRange(start, end);
+    });
+
+    const iamAchternaam = document.getElementById('fIamAchternaam');
+    iamAchternaam.addEventListener('input', function () {
+      const start = iamAchternaam.selectionStart;
+      const end = iamAchternaam.selectionEnd;
+      iamAchternaam.value = iamAchternaam.value.toLowerCase().replace(/(^|[\\s-])(\\S)/g, function (m, sep, ch) { return sep + ch.toUpperCase(); });
+      iamAchternaam.setSelectionRange(start, end);
+    });
+
+
+    const gebruikerId = document.getElementById('fIamGebruikerId');
+    const iamLoginCheck = document.getElementById('iamLoginCheck');
+    // 'ok' | 'taken' | 'pending' | 'error' for the value in iamLoginCheckedValue.
+    let iamLoginState = '';
+    let iamLoginCheckedValue = '';
+    let iamLoginCheckPromise = null;
+
+    function showIamLoginCheck(text, kind) {
+      iamLoginCheck.textContent = text;
+      iamLoginCheck.className = 'gb-form-hint' + (kind ? ' ' + kind : '');
+      iamLoginCheck.style.display = text ? '' : 'none';
+      gebruikerId.classList.toggle('gb-form-invalid', kind === '' && !!text);
+    }
+
+    // Same pattern as de gebruikersnaam-check bij Gebruikers toevoegen omgeving, maar tegen IAM (entiteit 'usr').
+    function checkGebruikerId() {
+      const value = gebruikerId.value.trim();
+      if (!value) { iamLoginState = ''; iamLoginCheckedValue = ''; iamLoginCheckPromise = null; showIamLoginCheck('', ''); return Promise.resolve(iamLoginState); }
+      if (value === iamLoginCheckedValue && iamLoginState === 'pending' && iamLoginCheckPromise) return iamLoginCheckPromise;
+      if (value === iamLoginCheckedValue && iamLoginState !== '' && iamLoginState !== 'error') return Promise.resolve(iamLoginState);
+      iamLoginCheckedValue = value;
+      iamLoginState = 'pending';
+      showIamLoginCheck('Controleren of gebruiker id al bestaat...', 'pending');
+      iamLoginCheckPromise = fetch('/api/gebruikersbeheer/toevoegen-iam/check-login?login=' + encodeURIComponent(value), { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (value !== iamLoginCheckedValue) return iamLoginState;
+          if (data && data.status === 'ok') {
+            iamLoginState = data.exists ? 'taken' : 'ok';
+            showIamLoginCheck(data.exists ? 'Gebruiker id bestaat al in IAM.' : 'Gebruiker id is beschikbaar.', data.exists ? '' : 'ok');
+          } else {
+            iamLoginState = 'error';
+            showIamLoginCheck((data && data.message) || 'Controle op bestaand gebruiker id is mislukt.', '');
+          }
+          return iamLoginState;
+        })
+        .catch(function () {
+          if (value !== iamLoginCheckedValue) return iamLoginState;
+          iamLoginState = 'error';
+          showIamLoginCheck('Controle op bestaand gebruiker id is mislukt.', '');
+          return iamLoginState;
+        });
+      return iamLoginCheckPromise;
+    }
+
+    gebruikerId.addEventListener('blur', checkGebruikerId);
+    gebruikerId.addEventListener('input', function () {
+      if (gebruikerId.value.trim() !== iamLoginCheckedValue) { iamLoginState = ''; iamLoginCheckPromise = null; showIamLoginCheck('', ''); }
+    });
+
+    // Zelfde syntaxregels als bij Gebruikers toevoegen omgeving (RFC-achtig, strenger dan de browser-validatie).
+    function validateEmailSyntax(value) {
+      if (!value) return 'Vul een e-mailadres in.';
+      if (value.length > 254) return 'E-mailadres mag maximaal 254 tekens bevatten.';
+      const atCount = (value.match(/@/g) || []).length;
+      if (atCount !== 1) return 'E-mailadres moet exact \u00e9\u00e9n @-teken bevatten.';
+      const parts = value.split('@');
+      const local = parts[0];
+      const domain = parts[1];
+      if (!local) return 'Vul minimaal 1 teken v\u00f3\u00f3r de @ in.';
+      if (!domain) return 'Vul minimaal 1 teken na de @ in.';
+      if (local.length > 64) return 'Het deel v\u00f3\u00f3r de @ mag maximaal 64 tekens bevatten.';
+      if (!/^[A-Za-z0-9._%+-]+$/.test(local)) return 'Het deel v\u00f3\u00f3r de @ bevat niet-toegestane tekens.';
+      if (local.startsWith('.') || local.endsWith('.')) return 'Het deel v\u00f3\u00f3r de @ mag niet beginnen of eindigen met een punt.';
+      if (local.indexOf('..') !== -1) return 'Het deel v\u00f3\u00f3r de @ mag geen opeenvolgende punten bevatten.';
+      if (domain.indexOf('.') === -1) return 'Het domein moet minimaal \u00e9\u00e9n punt bevatten.';
+      if (domain.startsWith('-') || domain.endsWith('-')) return 'Het domein mag niet beginnen of eindigen met een koppelteken.';
+      if (domain.indexOf('..') !== -1) return 'Het domein mag geen opeenvolgende punten bevatten.';
+      const tld = domain.slice(domain.lastIndexOf('.') + 1);
+      if (!/^[A-Za-z]{2,24}$/.test(tld)) return 'De extensie achter de laatste punt moet 2 tot 24 letters bevatten.';
+      return '';
+    }
+
+    const iamEmail = document.getElementById('fIamEmail');
+    const iamEmailCheck = document.getElementById('iamEmailCheck');
+    // 'ok' | 'invalid' | 'pending' | 'error' for the value in iamEmailCheckedValue.
+    let iamEmailState = '';
+    let iamEmailCheckedValue = '';
+    let iamEmailCheckPromise = null;
+
+    function showIamEmailCheck(text, kind) {
+      iamEmailCheck.textContent = text;
+      iamEmailCheck.className = 'gb-form-hint' + (kind ? ' ' + kind : '');
+      iamEmailCheck.style.display = text ? '' : 'none';
+      iamEmail.classList.toggle('gb-form-invalid', kind === '' && !!text);
+    }
+
+    function checkIamEmail() {
+      const value = iamEmail.value.replace(/[\\s\\u200B\\u200C\\u200D\\uFEFF]/g, '');
+      iamEmail.value = value;
+      if (!value) { iamEmailState = ''; iamEmailCheckedValue = ''; iamEmailCheckPromise = null; showIamEmailCheck('', ''); return Promise.resolve(iamEmailState); }
+      if (value === iamEmailCheckedValue && iamEmailState === 'pending' && iamEmailCheckPromise) return iamEmailCheckPromise;
+      if (value === iamEmailCheckedValue && iamEmailState !== '' && iamEmailState !== 'error') return Promise.resolve(iamEmailState);
+      iamEmailCheckedValue = value;
+      const syntaxError = validateEmailSyntax(value);
+      if (syntaxError) {
+        iamEmailState = 'invalid';
+        showIamEmailCheck(syntaxError, '');
+        return Promise.resolve(iamEmailState);
+      }
+      iamEmailState = 'pending';
+      showIamEmailCheck('Domein van e-mailadres controleren...', 'pending');
+      const domain = value.split('@')[1];
+      iamEmailCheckPromise = fetch('/api/gebruikersbeheer/toevoegen-omgeving/check-email-domain?domain=' + encodeURIComponent(domain), { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (value !== iamEmailCheckedValue) return iamEmailState;
+          if (!data || data.status !== 'ok') {
+            iamEmailState = 'error';
+            showIamEmailCheck((data && data.message) || 'Controle van het domein is mislukt.', '');
+            return iamEmailState;
+          }
+          if (!data.exists) {
+            iamEmailState = 'invalid';
+            showIamEmailCheck('Domein van het e-mailadres bestaat niet.', '');
+            return iamEmailState;
+          }
+          showIamEmailCheck('Controleren of e-mailadres al bestaat...', 'pending');
+          return fetch('/api/gebruikersbeheer/toevoegen-iam/check-email-exists?email=' + encodeURIComponent(value), { cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (existsData) {
+              if (value !== iamEmailCheckedValue) return iamEmailState;
+              if (!existsData || existsData.status !== 'ok') {
+                iamEmailState = 'error';
+                showIamEmailCheck((existsData && existsData.message) || 'Controle op bestaand e-mailadres is mislukt.', '');
+                return iamEmailState;
+              }
+              iamEmailState = existsData.exists ? 'invalid' : 'ok';
+              showIamEmailCheck(existsData.exists ? 'E-mailadres bestaat al in IAM.' : '', '');
+              return iamEmailState;
+            });
+        })
+        .catch(function () {
+          if (value !== iamEmailCheckedValue) return iamEmailState;
+          iamEmailState = 'error';
+          showIamEmailCheck('Controle van het domein is mislukt.', '');
+          return iamEmailState;
+        });
+      return iamEmailCheckPromise;
+    }
+
+    iamEmail.addEventListener('blur', checkIamEmail);
+    iamEmail.addEventListener('input', function () {
+      const cleaned = iamEmail.value.replace(/[\\s\\u200B\\u200C\\u200D\\uFEFF]/g, '');
+      if (cleaned !== iamEmail.value) iamEmail.value = cleaned;
+      if (iamEmail.value !== iamEmailCheckedValue) { iamEmailState = ''; iamEmailCheckPromise = null; showIamEmailCheck('', ''); }
+    });
+
+    const iamForm = document.getElementById('addUserIamForm');
+    const iamSubmitBtn = iamForm.querySelector('button[type="submit"]');
+    const iamAddFeedback = document.getElementById('addUserIamFeedback');
+
+    // Wachtwoord wijzigen pop-up (zelfde opzet als in de applicatie): Tenant/Gebruiker afgeschermd,
+    // nieuw/bevestig wachtwoord + sterktemeter. Opent automatisch na aanmaken en kan niet gesloten
+    // worden zonder dat het wachtwoord is gezet (geen Annuleren-knop, geen Escape); opslaan-actie volgt later.
+    const iamPwDialog = document.getElementById('iamPasswordDialog');
+    const iamPwTenant = document.getElementById('iamPwTenant');
+    const iamPwGebruiker = document.getElementById('iamPwGebruiker');
+    const iamPwNieuw = document.getElementById('iamPwNieuw');
+    const iamPwBevestig = document.getElementById('iamPwBevestig');
+    const iamPwStrengthValue = document.getElementById('iamPwStrengthValue');
+    const iamPwFeedback = document.getElementById('iamPwFeedback');
+    const iamPwSubmitBtn = document.getElementById('iamPwSubmitBtn');
+
+    function computePasswordStrength(value) {
+      if (!value) return 0;
+      let score = 0;
+      if (value.length >= 6) score++;
+      if (value.length >= 10) score++;
+      if (/[a-z]/.test(value) && /[A-Z]/.test(value)) score++;
+      if (/[0-9]/.test(value)) score++;
+      if (/[^A-Za-z0-9]/.test(value)) score++;
+      return score;
+    }
+
+    function updatePasswordStrength() {
+      const score = computePasswordStrength(iamPwNieuw.value);
+      iamPwStrengthValue.textContent = score + '/5';
+      iamPwStrengthValue.className = score <= 1 ? 'weak' : (score <= 3 ? 'medium' : 'strong');
+    }
+
+    // Uitvoeren wordt pas actief zodra beide velden gevuld zijn en aan elkaar gelijk.
+    function checkIamPasswordMatch() {
+      const nieuw = iamPwNieuw.value;
+      const bevestig = iamPwBevestig.value;
+      const bothFilled = !!nieuw && !!bevestig;
+      const match = bothFilled && nieuw === bevestig;
+      iamPwNieuw.classList.remove('gb-form-invalid');
+      iamPwBevestig.classList.toggle('gb-form-invalid', bothFilled && !match);
+      if (bothFilled && !match) {
+        iamPwFeedback.style.display = '';
+        iamPwFeedback.className = 'gb-note error';
+        iamPwFeedback.textContent = 'Wachtwoorden komen niet overeen.';
+      } else {
+        iamPwFeedback.style.display = 'none';
+      }
+      iamPwSubmitBtn.disabled = !match;
+      return match;
+    }
+    iamPwNieuw.addEventListener('input', function () { updatePasswordStrength(); checkIamPasswordMatch(); });
+    iamPwBevestig.addEventListener('input', checkIamPasswordMatch);
+
+    function openIamPasswordDialog() {
+      iamPwTenant.value = tenant.value;
+      iamPwGebruiker.value = gebruikerId.value.trim();
+      iamPwNieuw.value = '';
+      iamPwBevestig.value = '';
+      updatePasswordStrength();
+      checkIamPasswordMatch();
+      iamPwFeedback.style.display = 'none';
+      iamPwDialog.style.display = '';
+      iamPwNieuw.focus();
+    }
+
+    // Twee-staps aanroep zoals in de applicatie: eerst set_usr_password, daarna
+    // flow_set_usr_password_hash_password met de hash/salt/algoritme uit de eerste respons.
+    iamPwSubmitBtn.addEventListener('click', function () {
+      if (!checkIamPasswordMatch()) return;
+      iamPwSubmitBtn.disabled = true;
+      iamPwFeedback.style.display = '';
+      iamPwFeedback.className = 'gb-note';
+      iamPwFeedback.textContent = 'Wachtwoord wijzigen...';
+
+      fetch('/api/gebruikersbeheer/toevoegen-iam/set-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenantId: tenantId.value,
+          gebruikerId: gebruikerId.value.trim(),
+          nieuw: iamPwNieuw.value,
+          bevestig: iamPwBevestig.value,
+          strength: computePasswordStrength(iamPwNieuw.value)
+        })
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        if (!data || data.status !== 'ok') {
+          iamPwSubmitBtn.disabled = false;
+          iamPwFeedback.className = 'gb-note error';
+          iamPwFeedback.textContent = (data && data.message) || 'Wijzigen van het wachtwoord is mislukt.';
+          return;
+        }
+        iamPwDialog.style.display = 'none';
+        openIamUgDialog();
+      }).catch(function () {
+        iamPwSubmitBtn.disabled = false;
+        iamPwFeedback.className = 'gb-note error';
+        iamPwFeedback.textContent = 'Wijzigen van het wachtwoord is mislukt.';
+      });
+    });
+
+    // Gebruikersgroep toevoegen pop-up, direct aansluitend op Wachtwoord wijzigen. De Gebruikersgroep-lookup
+    // werkt hetzelfde als bij Gebruikers toevoegen omgeving (zelfde endpoint/tabelkolommen). Geen
+    // Annuleren-knop (zelfde "niet kunnen afsluiten zonder actie"-opzet als de wachtwoord pop-up).
+    const iamUgDialog = document.getElementById('iamUgDialog');
+    const iamUgTenant = document.getElementById('iamUgTenant');
+    const iamUgGebruikersgroep = document.getElementById('iamUgGebruikersgroep');
+    const iamUgGebruikersgroepId = document.getElementById('iamUgGebruikersgroepId');
+    const iamUgGebruikerIdField = document.getElementById('iamUgGebruikerId');
+    const iamUgFeedback = document.getElementById('iamUgFeedback');
+    const iamUgSubmitBtn = document.getElementById('iamUgSubmitBtn');
+    const iamUgOpenId = document.getElementById('iamUgOpenId');
+
+    const iamUgBegintOpDag = document.getElementById('iamUgBegintOpDag');
+    const iamUgBegintOpMaand = document.getElementById('iamUgBegintOpMaand');
+    const iamUgBegintOpJaar = document.getElementById('iamUgBegintOpJaar');
+    const iamUgBegintOpTijd = document.getElementById('iamUgBegintOpTijd');
+    const iamUgBegintOp = document.getElementById('iamUgBegintOp');
+    const iamUgEindigtOpDag = document.getElementById('iamUgEindigtOpDag');
+    const iamUgEindigtOpMaand = document.getElementById('iamUgEindigtOpMaand');
+    const iamUgEindigtOpJaar = document.getElementById('iamUgEindigtOpJaar');
+    const iamUgEindigtOpTijd = document.getElementById('iamUgEindigtOpTijd');
+    const iamUgEindigtOp = document.getElementById('iamUgEindigtOp');
+
+    bindDmyGroup('iamUgBegintOp');
+    bindDmyGroup('iamUgEindigtOp');
+    const iamUgBegintOpHint = document.getElementById('iamUgBegintOpHint');
+    const iamUgEindigtOpHint = document.getElementById('iamUgEindigtOpHint');
+
+    // Begint op moet later liggen dan de begindatum van de gebruiker, en (indien gezet) eerder dan
+    // de einddatum van de gebruiker. Eindigt op moet eerder liggen dan de einddatum van de gebruiker
+    // (indien gezet), en later dan de begindatum van de gebruiker (en dan Begint op zelf).
+    function checkIamUgPeriode() {
+      const userBeginIso = dmySegmentsToIso(begintOpDag.value, begintOpMaandSeg.value, begintOpJaarSeg.value);
+      const userEndIso = dmySegmentsToIso(eindigtOpDag.value, eindigtOpMaand.value, eindigtOpJaar.value);
+      const ugBeginHasAll = !!(iamUgBegintOpDag.value && iamUgBegintOpMaand.value && iamUgBegintOpJaar.value);
+      const ugEndHasAll = !!(iamUgEindigtOpDag.value && iamUgEindigtOpMaand.value && iamUgEindigtOpJaar.value);
+      const ugBeginIso = ugBeginHasAll ? dmySegmentsToIso(iamUgBegintOpDag.value, iamUgBegintOpMaand.value, iamUgBegintOpJaar.value) : '';
+      const ugEndIso = ugEndHasAll ? dmySegmentsToIso(iamUgEindigtOpDag.value, iamUgEindigtOpMaand.value, iamUgEindigtOpJaar.value) : '';
+      iamUgBegintOpTijd.value = ugBeginHasAll ? '00:00:00' : '';
+      iamUgEindigtOpTijd.value = ugEndHasAll ? '00:00:00' : '';
+
+      let beginInvalid = false;
+      let beginMessage = '';
+      if (ugBeginHasAll && !ugBeginIso) { beginInvalid = true; beginMessage = 'Vul een geldige datum in (dd/mm/jjjj).'; }
+      else if (ugBeginIso && userBeginIso && ugBeginIso <= userBeginIso) { beginInvalid = true; beginMessage = 'Begint op moet later liggen dan de begindatum van de gebruiker.'; }
+      else if (ugBeginIso && userEndIso && ugBeginIso >= userEndIso) { beginInvalid = true; beginMessage = 'Begint op moet eerder liggen dan de einddatum van de gebruiker.'; }
+
+      let endInvalid = false;
+      let endMessage = '';
+      if (ugEndHasAll && !ugEndIso) { endInvalid = true; endMessage = 'Vul een geldige datum in (dd/mm/jjjj).'; }
+      else if (ugEndIso && userEndIso && ugEndIso >= userEndIso) { endInvalid = true; endMessage = 'Eindigt op moet eerder liggen dan de einddatum van de gebruiker.'; }
+      else if (ugEndIso && userBeginIso && ugEndIso <= userBeginIso) { endInvalid = true; endMessage = 'Eindigt op moet later liggen dan de begindatum van de gebruiker.'; }
+      else if (ugEndIso && ugBeginIso && ugEndIso <= ugBeginIso) { endInvalid = true; endMessage = 'Eindigt op moet later liggen dan Begint op.'; }
+
+      iamUgBegintOp.classList.toggle('gb-form-invalid', beginInvalid);
+      iamUgBegintOpHint.style.display = beginInvalid ? '' : 'none';
+      iamUgBegintOpHint.textContent = beginMessage;
+      iamUgEindigtOp.classList.toggle('gb-form-invalid', endInvalid);
+      iamUgEindigtOpHint.style.display = endInvalid ? '' : 'none';
+      iamUgEindigtOpHint.textContent = endMessage;
+      return !beginInvalid && !endInvalid;
+    }
+    [iamUgBegintOpDag, iamUgBegintOpMaand, iamUgBegintOpJaar, iamUgEindigtOpDag, iamUgEindigtOpMaand, iamUgEindigtOpJaar].forEach(function (seg) {
+      seg.addEventListener('input', checkIamUgRequired);
+      seg.addEventListener('blur', checkIamUgRequired);
+    });
+
+    // Gebruikersgroep-lookup (zelfde data/kolommen als het veld Gebruikersgroep bij Gebruikers toevoegen omgeving).
+    const iamUgGroupLookup = document.getElementById('iamUgGroupLookup');
+    const iamUgGroupSearch = document.getElementById('iamUgGroupSearch');
+    const iamUgGroupFeedback = document.getElementById('iamUgGroupFeedback');
+    const iamUgGroupTableScroll = document.getElementById('iamUgGroupTableScroll');
+    const iamUgGroupTbody = document.getElementById('iamUgGroupTbody');
+    const iamUgGroupSelectBtn = document.getElementById('iamUgGroupSelectBtn');
+    let iamUgUserGroups = null;
+    let iamUgSelectedGroup = null;
+
+    function checkIamUgRequired() {
+      iamUgSubmitBtn.disabled = !iamUgGebruikersgroepId.value || !checkIamUgPeriode();
+    }
+
+    function renderIamUgGroups() {
+      const needle = (iamUgGroupSearch.value || '').trim().toLowerCase();
+      const rows = iamUgUserGroups.filter(function (g) {
+        return !needle || [g.id, g.description, g.product].some(function (v) {
+          return String(v || '').toLowerCase().indexOf(needle) !== -1;
+        });
+      });
+      if (!rows.length) {
+        iamUgGroupFeedback.style.display = '';
+        iamUgGroupFeedback.className = 'gb-branch-empty';
+        iamUgGroupFeedback.textContent = iamUgUserGroups.length ? 'Geen gebruikersgroepen gevonden voor deze zoekterm.' : 'Geen gebruikersgroepen gevonden.';
+        iamUgGroupTableScroll.style.display = 'none';
+        return;
+      }
+      iamUgGroupFeedback.style.display = 'none';
+      iamUgGroupTbody.innerHTML = rows.map(function (g) {
+        const sel = iamUgSelectedGroup && iamUgSelectedGroup.id === g.id ? ' class="gb-lookup-selected"' : '';
+        return '<tr data-id="' + escapeHtmlClient(g.id) + '"' + sel + '><td>' + escapeHtmlClient(g.id) + '</td><td>' + escapeHtmlClient(g.description)
+          + '</td><td>' + escapeHtmlClient(g.product) + '</td><td><input type="checkbox" disabled' + (g.customerSpecific ? ' checked' : '') + '></td></tr>';
+      }).join('');
+      iamUgGroupTableScroll.style.display = '';
+    }
+
+    function pickIamUgGroup(id) {
+      iamUgSelectedGroup = iamUgUserGroups.find(function (g) { return g.id === id; }) || null;
+      iamUgGroupSelectBtn.disabled = !iamUgSelectedGroup;
+      renderIamUgGroups();
+    }
+
+    function confirmIamUgGroup() {
+      if (!iamUgSelectedGroup) return;
+      iamUgGebruikersgroep.value = iamUgSelectedGroup.description || iamUgSelectedGroup.id;
+      iamUgGebruikersgroepId.value = iamUgSelectedGroup.id;
+      iamUgGebruikersgroep.classList.remove('gb-form-invalid');
+      checkIamUgRequired();
+      iamUgGroupLookup.style.display = 'none';
+    }
+
+    function openIamUgGroupLookup() {
+      iamUgGroupLookup.style.display = '';
+      iamUgGroupSearch.value = '';
+      iamUgGroupSearch.focus();
+      if (iamUgUserGroups) {
+        iamUgSelectedGroup = iamUgUserGroups.find(function (g) { return g.id === iamUgGebruikersgroepId.value; }) || null;
+        iamUgGroupSelectBtn.disabled = !iamUgSelectedGroup;
+        renderIamUgGroups();
+        return;
+      }
+      iamUgGroupSelectBtn.disabled = true;
+      iamUgGroupFeedback.style.display = '';
+      iamUgGroupFeedback.className = 'gb-branch-empty';
+      iamUgGroupFeedback.textContent = 'Gebruikersgroepen ophalen...';
+      fetch('/api/gebruikersbeheer/toevoegen-iam/user-groups', { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || data.status !== 'ok') throw new Error((data && data.message) || 'onbekende fout');
+          iamUgUserGroups = data.userGroups || [];
+          iamUgSelectedGroup = iamUgUserGroups.find(function (g) { return g.id === iamUgGebruikersgroepId.value; }) || null;
+          iamUgGroupSelectBtn.disabled = !iamUgSelectedGroup;
+          renderIamUgGroups();
+        })
+        .catch(function (err) {
+          iamUgGroupFeedback.className = 'gb-note error';
+          iamUgGroupFeedback.textContent = 'Ophalen mislukt: ' + (err && err.message || 'onbekende fout');
+        });
+    }
+
+    document.getElementById('iamUgGroupLookupBtn').addEventListener('click', openIamUgGroupLookup);
+    document.getElementById('iamUgGroupCloseBtn').addEventListener('click', function () { iamUgGroupLookup.style.display = 'none'; });
+    iamUgGroupSelectBtn.addEventListener('click', confirmIamUgGroup);
+    iamUgGroupSearch.addEventListener('input', function () { if (iamUgUserGroups) renderIamUgGroups(); });
+    iamUgGroupTbody.addEventListener('click', function (event) {
+      const row = event.target.closest('tr[data-id]');
+      if (row) pickIamUgGroup(row.getAttribute('data-id'));
+    });
+    iamUgGroupTbody.addEventListener('dblclick', function (event) {
+      const row = event.target.closest('tr[data-id]');
+      if (row) { pickIamUgGroup(row.getAttribute('data-id')); confirmIamUgGroup(); }
+    });
+    iamUgGroupLookup.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') iamUgGroupLookup.style.display = 'none';
+    });
+
+    function openIamUgDialog() {
+      iamUgTenant.value = tenant.value;
+      iamUgGebruikersgroep.value = '';
+      iamUgGebruikersgroepId.value = '';
+      iamUgGebruikerIdField.value = (iamVoornaam.value.trim() + ' ' + iamAchternaam.value.trim()).trim() + ' (' + gebruikerId.value.trim() + ')';
+      // Begint op/Eindigt op/OpenID aangemaakt starten gelijk aan de periode van de zojuist aangemaakte gebruiker.
+      iamUgBegintOpDag.value = begintOpDag.value;
+      iamUgBegintOpMaand.value = begintOpMaandSeg.value;
+      iamUgBegintOpJaar.value = begintOpJaarSeg.value;
+      iamUgEindigtOpDag.value = eindigtOpDag.value;
+      iamUgEindigtOpMaand.value = eindigtOpMaand.value;
+      iamUgEindigtOpJaar.value = eindigtOpJaar.value;
+      iamUgOpenId.checked = false;
+      iamUgFeedback.style.display = 'none';
+      checkIamUgPeriode();
+      checkIamUgRequired();
+      iamUgDialog.style.display = '';
+    }
+
+    // Insert (POST) naar usr_grp_usr, zelfde velden/opbouw als de echte applicatie.
+    iamUgSubmitBtn.addEventListener('click', function () {
+      if (!iamUgGebruikersgroepId.value || !checkIamUgPeriode()) return;
+      iamUgSubmitBtn.disabled = true;
+      iamUgFeedback.style.display = '';
+      iamUgFeedback.className = 'gb-note';
+      iamUgFeedback.textContent = 'Gebruikersgroep toevoegen...';
+
+      fetch('/api/gebruikersbeheer/toevoegen-iam/add-user-group', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenantId: tenantId.value,
+          gebruikersgroepId: iamUgGebruikersgroepId.value,
+          gebruikerId: gebruikerId.value.trim(),
+          beginOn: dmySegmentsToIso(iamUgBegintOpDag.value, iamUgBegintOpMaand.value, iamUgBegintOpJaar.value),
+          endOn: dmySegmentsToIso(iamUgEindigtOpDag.value, iamUgEindigtOpMaand.value, iamUgEindigtOpJaar.value),
+          openidProvisioned: iamUgOpenId.checked
+        })
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        if (!data || data.status !== 'ok') {
+          iamUgSubmitBtn.disabled = false;
+          iamUgFeedback.className = 'gb-note error';
+          iamUgFeedback.textContent = (data && data.message) || 'Toevoegen van de gebruikersgroep is mislukt.';
+          return;
+        }
+        iamUgDialog.style.display = 'none';
+        showIamAddFeedback('Gebruiker ' + gebruikerId.value.trim() + ' is aangemaakt in IAM, het wachtwoord is gezet en de gebruikersgroep is toegevoegd.', 'success');
+      }).catch(function () {
+        iamUgSubmitBtn.disabled = false;
+        iamUgFeedback.className = 'gb-note error';
+        iamUgFeedback.textContent = 'Toevoegen van de gebruikersgroep is mislukt.';
+      });
+    });
+
+    const IAM_REQUIRED_FIELD_LABELS = {
+      tenant: 'Tenant', gebruikerId: 'Gebruiker id (inlognaam)', voornaam: 'Voornaam',
+      achternaam: 'Achternaam', email: 'E-mailadres', telefoon: 'Telefoonnummer'
+    };
+
+    function showIamAddFeedback(text, kind) {
+      iamAddFeedback.textContent = text;
+      iamAddFeedback.className = 'gb-note' + (kind ? ' ' + kind : '');
+      iamAddFeedback.style.display = text ? '' : 'none';
+    }
+
+    iamForm.addEventListener('submit', function (event) {
+      event.preventDefault();
+      iamSubmitBtn.disabled = true;
+      showIamAddFeedback('Tenant controleren...', '');
+      tenantDefaultReady.then(function () {
+        const errors = [];
+        iamForm.querySelectorAll('.gb-form-invalid').forEach(function (el) { el.classList.remove('gb-form-invalid'); });
+        iamForm.querySelectorAll('.gb-form-required').forEach(function (el) {
+          if (!String(el.value || '').trim()) {
+            el.classList.add('gb-form-invalid');
+            errors.push(IAM_REQUIRED_FIELD_LABELS[el.name] || el.name);
+          }
+        });
+        if (!checkBegintOp()) errors.push('Begint op');
+        if (!checkEindigtOp()) errors.push('Eindigt op');
+        if (errors.length) {
+          iamSubmitBtn.disabled = false;
+          showIamAddFeedback('Vul de verplichte velden in: ' + errors.join(', ') + '.', 'error');
+          return;
+        }
+
+        showIamAddFeedback('Gebruiker id en e-mailadres controleren...', '');
+
+        // checkGebruikerId()/checkIamEmail() resolve once known (starting or reusing an in-flight
+        // check), so awaiting them here fixes clicking Uitvoeren before a field was ever blurred.
+        Promise.all([checkGebruikerId(), checkIamEmail()]).then(function (states) {
+          iamSubmitBtn.disabled = false;
+          const finalLoginState = states[0];
+          const finalEmailState = states[1];
+
+          if (finalLoginState !== 'ok') {
+            gebruikerId.classList.add('gb-form-invalid');
+            showIamAddFeedback(finalLoginState === 'taken' ? 'Gebruiker id bestaat al in IAM.'
+              : 'Controle op bestaand gebruiker id is mislukt; verlaat het veld Gebruiker id om opnieuw te controleren.', 'error');
+            return;
+          }
+          if (finalEmailState !== 'ok') {
+            iamEmail.classList.add('gb-form-invalid');
+            showIamAddFeedback(finalEmailState === 'invalid' ? (iamEmailCheck.textContent || 'Ongeldig e-mailadres.')
+              : 'Controle van het e-mailadres is mislukt; verlaat het veld E-mailadres om opnieuw te controleren.', 'error');
+            return;
+          }
+
+          iamSubmitBtn.disabled = true;
+          showIamAddFeedback('Gebruiker aanmaken...', '');
+
+          const payload = {
+            tenantId: tenantId.value,
+            gebruikerId: gebruikerId.value.trim(),
+            voornaam: iamVoornaam.value.trim(),
+            achternaam: iamAchternaam.value.trim(),
+            geslacht: document.getElementById('fIamGeslacht').value,
+            email: iamEmail.value.trim(),
+            telefoon: iamTelefoon.value.trim(),
+            applicatieTaal: document.getElementById('fIamApplicatieTaal').value,
+            inlogverificatie: inlogverificatie.value,
+            terugvallenEmail: terugvallenEmail.checked,
+            wachtwoordWijzigen: wachtwoordWijzigen.checked,
+            wachtwoordverloopbeleid: wachtwoordverloopbeleid.value,
+            configuratieId: document.getElementById('fIamConfiguratie').value,
+            maxSessies: document.getElementById('fIamMaxSessies').checked,
+            persoonlijkeTokens: document.getElementById('fIamPersoonlijkeTokens').checked,
+            begintOp: dmySegmentsToIso(begintOpDag.value, begintOpMaandSeg.value, begintOpJaarSeg.value),
+            eindigtOp: dmySegmentsToIso(eindigtOpDag.value, eindigtOpMaand.value, eindigtOpJaar.value)
+          };
+
+          fetch('/api/gebruikersbeheer/toevoegen-iam/create-user', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          }).then(function (r) { return r.json(); }).then(function (data) {
+            iamSubmitBtn.disabled = false;
+            if (!data || data.status !== 'ok') {
+              showIamAddFeedback((data && data.message) || 'Aanmaken van de gebruiker is mislukt.', 'error');
+              return;
+            }
+            showIamAddFeedback('Gebruiker ' + payload.gebruikerId + ' is aangemaakt in IAM.', 'success');
+            iamSubmitBtn.disabled = true;
+            openIamPasswordDialog();
+          }).catch(function () {
+            iamSubmitBtn.disabled = false;
+            showIamAddFeedback('Aanmaken van de gebruiker is mislukt.', 'error');
+          });
+        });
+      });
+    });
+
+    document.getElementById('addUserIamResetBtn').addEventListener('click', function () {
+      document.getElementById('addUserIamForm').reset();
+      updateLoginAvailability();
+      updateWachtwoordverloopbeleidAvailability();
+      checkBegintOp();
+      checkEindigtOp();
+      iamSubmitBtn.disabled = false;
+      iamLoginState = ''; iamLoginCheckedValue = ''; iamLoginCheckPromise = null; showIamLoginCheck('', '');
+      iamEmailState = ''; iamEmailCheckedValue = ''; iamEmailCheckPromise = null; showIamEmailCheck('', '');
+      showIamAddFeedback('', '');
+
+      // form.reset() leegt ook Tenant (en het verborgen tenantId-veld); default opnieuw invullen.
+      tenantId.value = '';
+      if (tenants) {
+        const def = tenants.find(function (t) { return t.isDefault; }) || tenants[0];
+        if (def) applyTenant(def);
+      } else {
+        tenantDefaultReady = loadTenants().then(function (list) {
+          const def = list.find(function (t) { return t.isDefault; }) || list[0];
+          if (def) applyTenant(def);
+        }).catch(function () {});
+      }
+    });
+  })();
+`;
+
+function renderToevoegenIamPage() {
+  return renderUserOverviewPage({
+    activeKey: 'toevoegen-iam',
+    title: 'Gebruikers toevoegen IAM',
+    subtitle: 'Maak eerst verbinding met een IAM-omgeving voordat gebruikers toegevoegd kunnen worden.',
+    connectedSubtitle: 'Verbonden. Voeg gebruikers toe aan de gekozen IAM-omgeving.',
+    iamOnly: true,
+    connectOnly: true,
+    connectedPanelHtml: renderToevoegenIamFormHtml(),
+    connectedPanelStyle: TOEVOEGEN_IAM_FORM_STYLE,
+    connectedPanelScript: TOEVOEGEN_IAM_FORM_SCRIPT
   });
 }
 
@@ -2977,6 +4212,36 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // IAM-gebruikersgroepen staan in usr_grp (andere tabel dan company_brand_user_groups bij de omgeving);
+  // exacte kolomnamen zijn (nog) niet bevestigd, daarom fuzzy veldherkenning via pickUserFieldValue.
+  if (req.method === 'GET' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/user-groups') {
+    (async function () {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim().replace(/\/+$/, '');
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+      const result = await fetchJsonFromUrl(appUrl + '/usr_grp?$top=1000', authHeader, 15000);
+      if (!result) { sendJson({ status: 'error', message: 'Ophalen van gebruikersgroepen is mislukt.' }); return; }
+      sendJson({
+        status: 'ok',
+        userGroups: parseUserRowsResponse(result).map(function (row) {
+          return {
+            id: pickUserFieldValue(row, ['usr_grp_id', 'user_group_id', 'id']),
+            description: pickUserFieldValue(row, ['usr_grp_description', 'description_display', 'description', 'name']),
+            product: pickUserFieldValue(row, ['product', 'product_description']),
+            customerSpecific: findUserFieldValue(row, ['is_customer_specific', 'customer_specific']).value === 'true'
+          };
+        })
+      });
+    })();
+    return;
+  }
+
   if (req.method === 'GET' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-omgeving/employee-functions') {
     (async function () {
       const sendJson = function (payload) {
@@ -3060,6 +4325,295 @@ const server = http.createServer((req, res) => {
       const departments = await fetchEmployeeDepartments(appUrl, authHeader);
       if (!departments) { sendJson({ status: 'error', message: 'Ophalen van afdelingen is mislukt.' }); return; }
       sendJson({ status: 'ok', departments: departments });
+    })();
+    return;
+  }
+
+  if (req.method === 'GET' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/appl-languages') {
+    (async function () {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim().replace(/\/+$/, '');
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+      // appl_lang_overview: appl_lang_id = taalcode, appl_lang_description = omschrijving.
+      const result = await fetchJsonFromUrl(appUrl + '/appl_lang_overview?$select=appl_lang_id,appl_lang_description&$orderby=appl_lang_description&$top=1000', authHeader, 15000);
+      if (!result) { sendJson({ status: 'error', message: 'Ophalen van applicatietalen is mislukt.' }); return; }
+      sendJson({
+        status: 'ok',
+        languages: parseUserRowsResponse(result).map(function (row) {
+          return { id: row.appl_lang_id, name: String(row.appl_lang_description || '') };
+        })
+      });
+    })();
+    return;
+  }
+
+  if (req.method === 'GET' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/configuraties') {
+    (async function () {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim().replace(/\/+$/, '');
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+      // Exacte kolomnamen van write_back_usr_pref_type zijn (nog) niet bevestigd; daarom geen $select
+      // en wordt id/naam via pickUserFieldValue (fuzzy) bepaald.
+      const result = await fetchJsonFromUrl(appUrl + '/write_back_usr_pref_type?$top=1000', authHeader, 15000);
+      if (!result) { sendJson({ status: 'error', message: 'Ophalen van configuraties is mislukt.' }); return; }
+      sendJson({
+        status: 'ok',
+        configuraties: parseUserRowsResponse(result).map(function (row) {
+          return {
+            id: pickUserFieldValue(row, ['write_back_usr_pref_type_id', 'id']),
+            name: pickUserFieldValue(row, ['write_back_usr_pref_type_description', 'description_display', 'description', 'name'])
+          };
+        })
+      });
+    })();
+    return;
+  }
+
+  if (req.method === 'GET' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/check-login') {
+    (async function () {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      const loginId = String(parsed.searchParams.get('login') || '').trim();
+      if (!loginId) { sendJson({ status: 'error', message: 'Geen gebruiker id opgegeven.' }); return; }
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim();
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+      const exists = await usrLoginIdExists(appUrl, authHeader, loginId);
+      if (exists === null) { sendJson({ status: 'error', message: 'Controle op bestaand gebruiker id is mislukt.' }); return; }
+      sendJson({ status: 'ok', exists: exists });
+    })();
+    return;
+  }
+
+  if (req.method === 'GET' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/check-email-exists') {
+    (async function () {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      const email = String(parsed.searchParams.get('email') || '').trim();
+      if (!email) { sendJson({ status: 'error', message: 'Geen e-mailadres opgegeven.' }); return; }
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim();
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+      const exists = await usrEmailExists(appUrl, authHeader, email);
+      if (exists === null) { sendJson({ status: 'error', message: 'Controle op bestaand e-mailadres is mislukt.' }); return; }
+      sendJson({ status: 'ok', exists: exists });
+    })();
+    return;
+  }
+
+  if (req.method === 'POST' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/create-user') {
+    readJsonBody(req).then(async function (data) {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim().replace(/\/+$/, '');
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+
+      const d = data && typeof data === 'object' ? data : {};
+      const requiredMissing = ['tenantId', 'gebruikerId', 'voornaam', 'achternaam', 'email', 'begintOp']
+        .filter(function (key) { return !String(d[key] || '').trim(); });
+      if (requiredMissing.length) { sendJson({ status: 'error', message: 'Verplichte velden ontbreken: ' + requiredMissing.join(', ') + '.' }); return; }
+
+      // Codes bevestigd door de gebruiker (niet 1-op-1 uit de tabel af te leiden): gender Man=0/Vrouw=1;
+      // two_factor_authentication_type Wachtwoord=0/SMS=1/email=2/TOTP token=3; password_expiration_policy
+      // Geforceerd verlopen=0/Standaard beleid=1/Verloopt nooit=2 (afgeleid uit een echt aangemaakte gebruiker).
+      const twoFactorMap = { wachtwoord: 0, wachtwoord_sms: 1, wachtwoord_email: 2, wachtwoord_totp: 3 };
+      const expirationPolicyMap = { forced_expired: 0, standard: 1, never: 2 };
+      const voornaam = String(d.voornaam || '').trim();
+      const achternaam = String(d.achternaam || '').trim();
+      const gebruikerId = String(d.gebruikerId || '').trim();
+      const authUser = String(readConnectionConfig().authUser || '').trim();
+      const nowIso = new Date().toISOString();
+
+      const payload = {
+        tenant_id: Number(d.tenantId),
+        usr_id: gebruikerId,
+        first_name: voornaam,
+        sur_name: achternaam,
+        name: voornaam + ' ' + achternaam + ' (' + gebruikerId + ')',
+        gender: String(d.geslacht || '').trim() === 'vrouw' ? 1 : 0,
+        email: String(d.email || '').trim(),
+        phone_no: String(d.telefoon || '').trim(),
+        time_zone_id: 'Etc/UTC',
+        appl_lang_id: String(d.applicatieTaal || '').trim() || null,
+        authentication_type: 3,
+        two_factor_authentication_type: Object.prototype.hasOwnProperty.call(twoFactorMap, d.inlogverificatie) ? twoFactorMap[d.inlogverificatie] : 0,
+        allow_fallback_to_email: d.terugvallenEmail === true,
+        allow_change_password: d.wachtwoordWijzigen === true,
+        password_expiration_policy: Object.prototype.hasOwnProperty.call(expirationPolicyMap, d.wachtwoordverloopbeleid) ? expirationPolicyMap[d.wachtwoordverloopbeleid] : 2,
+        password_changed_count: 0,
+        password_forgotten_count: 0,
+        begin_on: String(d.begintOp || '').trim() + 'T00:00:00',
+        write_back_usr_pref_type_id: String(d.configuratieId || '').trim() ? Number(d.configuratieId) : null,
+        exclude_from_max_concurrent_sessions: d.maxSessies === true,
+        allow_create_pat: d.persoonlijkeTokens === true
+      };
+      if (String(d.eindigtOp || '').trim()) payload.end_on = String(d.eindigtOp).trim() + 'T00:00:00';
+      if (authUser) {
+        payload.insert_user = authUser;
+        payload.insert_date_time = nowIso;
+        payload.update_user = authUser;
+        payload.update_date_time = nowIso;
+      }
+
+      const createResult = await postJsonToUrl(appUrl + '/usr', authHeader, payload, 20000);
+      if (!createResult.ok) {
+        const message = friendlyTsfErrorMessage(createResult, (createResult.body && typeof createResult.body === 'object' && (createResult.body.message || createResult.body.error)) || 'Aanmaken van de gebruiker is mislukt.');
+        sendJson({ status: 'error', message: String(message) });
+        return;
+      }
+      sendJson({ status: 'ok', result: createResult.body });
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/set-password') {
+    readJsonBody(req).then(async function (data) {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim().replace(/\/+$/, '');
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+
+      const d = data && typeof data === 'object' ? data : {};
+      const tenantId = Number(d.tenantId);
+      const usrId = String(d.gebruikerId || '').trim();
+      const nieuw = String(d.nieuw || '');
+      const bevestig = String(d.bevestig || '');
+      if (!tenantId || !usrId || !nieuw || !bevestig) { sendJson({ status: 'error', message: 'Verplichte velden ontbreken.' }); return; }
+      if (nieuw !== bevestig) { sendJson({ status: 'error', message: 'Wachtwoorden komen niet overeen.' }); return; }
+      const strength = Number(d.strength) || 0;
+      const invalidatePat = false;
+
+      // Stap 1: set_usr_password (zelfde input_set-XML-opbouw als de echte applicatie).
+      const inputSet = '<rows>\r\n  <row>\r\n    <tenant_id>' + tenantId + '</tenant_id>\r\n    <usr_id>' + escapeHtml(usrId) + '</usr_id>\r\n'
+        + '    <new_password>' + escapeHtml(nieuw) + '</new_password>\r\n    <confirm_password>' + escapeHtml(bevestig) + '</confirm_password>\r\n'
+        + '    <password_strength_label>' + strength + '/5</password_strength_label>\r\n    <invalidate_pat>' + invalidatePat + '</invalidate_pat>\r\n'
+        + '    <password_strength>' + strength + '</password_strength>\r\n  </row>\r\n</rows>';
+      const setPasswordPayload = {
+        tenant_id: tenantId,
+        usr_id: usrId,
+        new_password: nieuw,
+        confirm_password: bevestig,
+        invalidate_pat: invalidatePat,
+        password_strength: strength,
+        input_set: inputSet
+      };
+      const setPasswordResult = await postJsonToUrl(appUrl + '/set_usr_password', authHeader, setPasswordPayload, 20000);
+      if (!setPasswordResult.ok) {
+        const message = friendlyTsfErrorMessage(setPasswordResult, (setPasswordResult.body && typeof setPasswordResult.body === 'object' && (setPasswordResult.body.message || setPasswordResult.body.error)) || 'Wijzigen van het wachtwoord is mislukt.');
+        sendJson({ status: 'error', message: String(message) });
+        return;
+      }
+
+      // flow_set_usr_password_hash_password wordt door Indicium zelf (server-side, als gevolg van
+      // set_usr_password / het herladen van de usr-layout) aangeroepen; de wizard hoeft dit niet
+      // zelf nog eens los aan te roepen.
+      sendJson({ status: 'ok' });
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/add-user-group') {
+    readJsonBody(req).then(async function (data) {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim().replace(/\/+$/, '');
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+
+      const d = data && typeof data === 'object' ? data : {};
+      const tenantId = Number(d.tenantId);
+      const usrGrpId = String(d.gebruikersgroepId || '').trim();
+      const usrId = String(d.gebruikerId || '').trim();
+      const beginOn = String(d.beginOn || '').trim();
+      if (!tenantId || !usrGrpId || !usrId || !beginOn) { sendJson({ status: 'error', message: 'Verplichte velden ontbreken.' }); return; }
+      const authUser = String(readConnectionConfig().authUser || '').trim();
+      const nowIso = new Date().toISOString();
+
+      const payload = {
+        tenant_id: tenantId,
+        usr_grp_id: usrGrpId,
+        usr_id: usrId,
+        begin_on: beginOn + 'T00:00:00',
+        openid_provisioned: d.openidProvisioned === true
+      };
+      if (String(d.endOn || '').trim()) payload.end_on = String(d.endOn).trim() + 'T00:00:00';
+      if (authUser) {
+        payload.insert_user = authUser;
+        payload.insert_date_time = nowIso;
+        payload.update_user = authUser;
+        payload.update_date_time = nowIso;
+      }
+
+      const result = await postJsonToUrl(appUrl + '/usr_grp_usr', authHeader, payload, 20000);
+      if (!result.ok) {
+        const message = friendlyTsfErrorMessage(result, (result.body && typeof result.body === 'object' && (result.body.message || result.body.error)) || 'Toevoegen van de gebruikersgroep is mislukt.');
+        sendJson({ status: 'error', message: String(message) });
+        return;
+      }
+      sendJson({ status: 'ok', result: result.body });
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && parsed.pathname === '/api/gebruikersbeheer/toevoegen-iam/tenants') {
+    (async function () {
+      const sendJson = function (payload) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(payload));
+      };
+      if (!isEnvironmentConnected()) { sendJson({ status: 'error', message: 'Nog niet verbonden met een omgeving.' }); return; }
+      const params = readJsonSafe(FLOW_PARAMS_PATH, {});
+      const appUrl = String(params.application_url || '').trim().replace(/\/+$/, '');
+      const authHeader = getIamAuthHeader();
+      if (!appUrl || !authHeader) { sendJson({ status: 'error', message: 'Verbindingsgegevens ontbreken.' }); return; }
+      const result = await fetchJsonFromUrl(appUrl + '/tenant?$select=tenant_id,tenant_name,default_tenant,customer_id,technical_id&$orderby=tenant_name&$top=1000', authHeader, 15000);
+      if (!result) { sendJson({ status: 'error', message: 'Ophalen van tenants is mislukt.' }); return; }
+      sendJson({
+        status: 'ok',
+        tenants: parseUserRowsResponse(result).map(function (row) {
+          return {
+            id: row.tenant_id,
+            name: String(row.tenant_name || ''),
+            isDefault: row.default_tenant === true,
+            customerId: String(row.customer_id || ''),
+            technicalId: String(row.technical_id || '')
+          };
+        })
+      });
     })();
     return;
   }
@@ -3315,6 +4869,12 @@ const server = http.createServer((req, res) => {
   if (parsed.pathname === '/gebruikersbeheer/toevoegen-omgeving') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderToevoegenOmgevingPage());
+    return;
+  }
+
+  if (parsed.pathname === '/gebruikersbeheer/toevoegen-iam') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(renderToevoegenIamPage());
     return;
   }
 
